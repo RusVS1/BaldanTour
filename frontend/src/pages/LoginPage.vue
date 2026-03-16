@@ -5,5 +5,5 @@
 </template>
 
 <script setup lang="ts">
-import AuthCard from 'components/AuthCard.vue';
+import AuthCard from 'src/components/login/AuthCard.vue';
 </script>

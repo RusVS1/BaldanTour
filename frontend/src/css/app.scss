@@ -1,11 +1,19 @@
 .border-radius-md {
-  border-radius: 18px;
+  border-radius: 20px;
 }
 
-.bg-lightgrey-background {
+.custom-lightgrey-background {
   background-color: $lightgrey-background;
+}
+
+.custom-arrow-blue .q-icon {
+  color: $blue;
 }
 
 .custom-opacity {
   opacity: 0.6;
+}
+
+.custom-font-size {
+  font-size: 20px;
 }
