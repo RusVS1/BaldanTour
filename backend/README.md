@@ -1,70 +1,38 @@
-# Бэкенд BaldanTour (Django)
+# Tour Aggregator (Django)
 
-Папка содержит бэкенд-API для фронтенда, Postgres и Swagger-документацию.
+## Быстрый старт (PostgreSQL)
 
-## Запуск
+### Вариант A: запуск в Docker (backend + PostgreSQL)
 
-Из папки `backend`:
+1) Скопируйте переменные окружения:
 
-```powershell
-docker compose up -d --build
-```
+- `copy .env.example .env`
 
-После старта:
-- Swagger UI: `http://localhost:18000/api/docs/`
-- OpenAPI схема (YAML): `http://localhost:18000/api/schema/`
+2) Запустите всё:
 
-Порты в `docker-compose.yml`:
-- API: `18000 -> 8000`
-- Postgres: `15432 -> 5432`
+- `docker compose -p touragg up --build`
 
-## Данные (сид и слепок)
+Backend будет доступен на `http://127.0.0.1:8000/`, Swagger — `http://127.0.0.1:8000/api/docs/`.
 
-В репозиторий не кладется полный дамп Postgres (слишком большой). Вместо этого есть:
-- `seed/sample_parsed_tours.json`: фиксированные тестовые данные (страны + туры) с эмбеддингами
-- `db/snapshot_random_300_tours.json`: рандомный слепок 300 туров со всеми полями, включая `embedding`
-- `embeddings/parsed_tours_embeddings.npz`: кэш эмбеддингов (ускоряет семантический поиск)
+### Вариант B: локально (PostgreSQL в Docker, backend локально)
 
-## Авторизация (login + password)
+1) `copy .env.example .env`
+2) `docker compose -p touragg up -d db`
+3) `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`
+4) `.\.venv\Scripts\python.exe manage.py migrate`
+5) `.\.venv\Scripts\python.exe manage.py runserver`
 
-Эндпоинты:
-- `POST /api/auth/register`
-- `POST /api/auth/login`
+## Импорт туров из CSV
 
-Тестовый пользователь создается автоматически при старте контейнера:
-- login: `db_test_user`
-- password: `db_test_password_123`
+- Smoke-test на 2000 строк:
+  - `.\.venv\Scripts\python.exe manage.py import_tours_csv --limit 2000`
 
-## Личный кабинет
+CSV по умолчанию берутся из папки `Распаршенные страны`.
 
-JWT обязателен (заголовок `Authorization: Bearer <token>`).
+## API
 
-- `GET /api/me` возвращает:
-  - `user` (id/login/created_at)
-  - `favorites_count`
-
-## Избранное
-
-JWT обязателен.
-
-- `GET /api/favorites/` список избранного
-- `POST /api/favorites/add` body:
-  ```json
-  { "tour_id": 165077 }
-  ```
-- `DELETE /api/favorites/{tour_id}` удалить тур из избранного
-
-## Туры
-
-- `GET /api/health`
-- `GET /api/countries`
-- `GET /api/tours` (фильтры + пагинация `limit/offset`)
-- `GET /api/tours/{id}`
-- `POST /api/tours/semantic-search` семантический поиск:
-  ```json
-  { "text": "хочу тур в Испанию", "country": "spain", "limit": 5 }
-  ```
-
-Все параметры/поля запросов и ответов удобно смотреть и проверять в Swagger:
-`http://localhost:18000/api/docs/`.
-
+- `GET /api/tours/` — поиск (по умолчанию сортировка от дешёвых)
+- `GET /api/tours/{id}/`
+- `GET /api/favorites/` — избранное пользователя (нужна сессия)
+- `POST /api/favorites/{tour_id}/`
+- `DELETE /api/favorites/{tour_id}/`
