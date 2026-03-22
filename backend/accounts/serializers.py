@@ -48,3 +48,16 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["id", "username", "is_staff", "is_superuser"]
+
+
+class UserEnvelopeSerializer(serializers.Serializer):
+    user = UserSerializer()
+
+
+class AuthStatusSerializer(serializers.Serializer):
+    authenticated = serializers.BooleanField()
+    user = UserSerializer(allow_null=True, required=False)
+
+
+class OkSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()

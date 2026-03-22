@@ -16,4 +16,4 @@ COPY . /app
 
 EXPOSE 8000
 
-CMD ["bash", "docker/entrypoint.sh"]
+CMD ["bash", "entrypoint.sh"]
