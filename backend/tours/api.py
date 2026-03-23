@@ -551,13 +551,28 @@ class FilterMealAPI(APIView):
 
     @extend_schema(responses=ValuesOptionsEnvelopeSerializer)
     def get(self, request):
-        values = (
+        values = list(
             Tour.objects.exclude(meal="")
             .order_by("meal")
             .values_list("meal", flat=True)
             .distinct()
         )
-        return Response({"values": [{"label": v, "value": v} for v in values]})
+        seen: set[str] = set()
+        options = []
+        for v in values:
+            code = (v or "").strip()
+            if not code:
+                continue
+            code = code.upper()
+            if code in seen:
+                continue
+            seen.add(code)
+
+            ext = _meal_extension(code)
+            label = f"{ext} ({code})" if ext else code
+            options.append({"label": label, "value": code})
+
+        return Response({"values": options})
 
 
 class FilterTownFromAPI(APIView):
@@ -676,14 +691,29 @@ class FavoriteFilterMealAPI(APIView):
         except serializers.ValidationError as e:
             return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
 
-        values = (
+        values = list(
             Tour.objects.filter(favorites__user_id=user_id)
             .exclude(meal="")
             .order_by("meal")
             .values_list("meal", flat=True)
             .distinct()
         )
-        return Response({"values": [{"label": v, "value": v} for v in values]})
+        seen: set[str] = set()
+        options = []
+        for v in values:
+            code = (v or "").strip()
+            if not code:
+                continue
+            code = code.upper()
+            if code in seen:
+                continue
+            seen.add(code)
+
+            ext = _meal_extension(code)
+            label = f"{ext} ({code})" if ext else code
+            options.append({"label": label, "value": code})
+
+        return Response({"values": options})
 
 
 class FavoriteFilterTownFromAPI(APIView):
@@ -1010,12 +1040,10 @@ class FavoriteTourAPI(APIView):
 
 class AISearchRequestSerializer(serializers.Serializer):
     query = serializers.CharField()
-    limit = serializers.IntegerField(required=False, min_value=1, max_value=200, default=50)
 
 
 class AISearchMetaSerializer(serializers.Serializer):
     query = serializers.CharField()
-    limit = serializers.IntegerField()
     count = serializers.IntegerField()
     embedding_provider = serializers.CharField()
     embedding_model = serializers.CharField(allow_blank=True)
@@ -1078,13 +1106,13 @@ class AISearchAPI(APIView):
         examples=[
             OpenApiExample(
                 "Request example",
-                value={"query": "Абхазия, отель для детей, завтрак", "limit": 5},
+                value={"query": "Абхазия, отель для детей, завтрак"},
                 request_only=True,
             ),
             OpenApiExample(
                 "Response example",
                 value={
-                    "meta": {"query": "Абхазия, отель для детей, завтрак", "limit": 5, "count": 1},
+                    "meta": {"query": "Абхазия, отель для детей, завтрак", "count": 1},
                     "results": [
                         {
                             "id": 123,
@@ -1135,7 +1163,6 @@ class AISearchAPI(APIView):
         req = AISearchRequestSerializer(data=request.data)
         req.is_valid(raise_exception=True)
         query = (req.validated_data["query"] or "").strip()
-        limit = int(req.validated_data.get("limit") or 50)
 
         if not query:
             return Response({"error": "empty_query"}, status=status.HTTP_400_BAD_REQUEST)
@@ -1154,7 +1181,7 @@ class AISearchAPI(APIView):
             .prefetch_related("amenities")
         )
 
-        tours = list(qs[:limit])
+        tours = list(qs)
         results = []
         for t in tours:
             distance = float(getattr(t, "distance", 0.0) or 0.0)
@@ -1213,7 +1240,6 @@ class AISearchAPI(APIView):
             {
                 "meta": {
                     "query": query,
-                    "limit": limit,
                     "count": len(results),
                     "embedding_provider": embedder.provider,
                     "embedding_model": embedding_model,
