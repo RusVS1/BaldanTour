@@ -77,8 +77,7 @@ services:
     environment:
       - TZ=Europe/Moscow
     labels:
-      # ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
-      ofelia.job-run.parser.schedule: "0 36 * * * *"
+      ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
       ofelia.job-run.parser.image: "parser-app:latest"
       ofelia.job-run.parser.command: >
         python /app/main.py
