@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import re
 from datetime import date
 from pathlib import Path
@@ -8,7 +9,7 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Value, When
 from django.utils.text import slugify
 
-from tours.models import Amenity, Favorite, Tour
+from tours.models import Amenity, Favorite, Tour, TourImage, TourText
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -103,6 +104,58 @@ def _parse_hotel_type(*values: str | None) -> str:
     return ""
 
 
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_INFRA_RE = re.compile(r"\bинфраструктура\b", flags=re.IGNORECASE)
+_RULES_RE = re.compile(r"правила\s+размещения\s+в\s+отелях", flags=re.IGNORECASE)
+
+
+def _extract_answer_description(target_desc: str) -> str:
+    target_desc = (target_desc or "").strip()
+    if not target_desc:
+        return ""
+    m = _INFRA_RE.search(target_desc)
+    if not m:
+        extracted = target_desc
+    else:
+        extracted = target_desc[: m.start()].strip()
+
+    extracted = _RULES_RE.sub("", extracted).strip()
+    return extracted
+
+
+_COUNTRY_SLUG_TO_RU = {
+    "abkhazia": "Абхазия",
+    "armenia": "Армения",
+    "belarus": "Беларусь",
+    "china": "Китай",
+    "georgia": "Грузия",
+    "maldives": "Мальдивы",
+    "russia": "Россия",
+    "spain": "Испания",
+}
+
+_TOWNFROM_SLUG_TO_RU = {
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "kaliningrad": "Калининград",
+    "spb": "Санкт-Петербург",
+    "sankt-peterburg": "Санкт-Петербург",
+}
+
+
+def _to_ru_label(value: str | None, mapping: dict[str, str]) -> str:
+    v = (value or "").strip()
+    if not v:
+        return ""
+    # if it's already in Cyrillic, keep as-is
+    if re.search(r"[А-Яа-яЁё]", v):
+        return v
+    return mapping.get(v, v)
+
+
 class Command(BaseCommand):
     help = "Import tours from CSV files."
 
@@ -166,6 +219,8 @@ class Command(BaseCommand):
                 Tour.amenities.through.objects.all().delete()
                 Amenity.objects.all().delete()
                 Tour.objects.all().delete()
+                TourText.objects.all().delete()
+                TourImage.objects.all().delete()
 
         if base_dir is not None:
             if not base_dir.exists():
@@ -190,6 +245,11 @@ class Command(BaseCommand):
     def _import_one(self, csv_path: Path, *, batch_size: int, total: int, limit: int | None) -> int:
         to_create: list[Tour] = []
         pending_amenities: list[list[str]] = []
+        pending_text_hashes: list[tuple[str | None, str | None, str | None]] = []
+        text_by_hash: dict[str, str] = {}
+
+        pending_image_hashes: list[str | None] = []
+        image_by_hash: dict[str, str] = {}
 
         # utf-8-sig gracefully handles CSVs saved with BOM (common on Windows)
         with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -197,31 +257,57 @@ class Command(BaseCommand):
             for row in reader:
                 price_value, price_text = _parse_price(row.get("price"))
 
+                common_desc = (row.get("common_description") or "").strip()
+                target_desc = (row.get("target_description") or "").strip()
+                answer_desc = _extract_answer_description(target_desc)
+                common_hash = _sha256_text(common_desc) if common_desc else None
+                target_hash = _sha256_text(target_desc) if target_desc else None
+                answer_hash = _sha256_text(answer_desc) if answer_desc else None
+                if common_hash and common_hash not in text_by_hash:
+                    text_by_hash[common_hash] = common_desc
+                if target_hash and target_hash not in text_by_hash:
+                    text_by_hash[target_hash] = target_desc
+                if answer_hash and answer_hash not in text_by_hash:
+                    text_by_hash[answer_hash] = answer_desc
+
+                hotel_stars = _parse_int(row.get("hotel_stars"))
+                direct_hotel_type = (row.get("hotel_type") or "").strip()
+
+                country_slug = (row.get("country_slug") or "").strip()
+                townfrom = (row.get("townfrom") or "").strip()
+
+                image_url = (row.get("main_image_url") or "").strip() or None
+                image_hash = _sha256_text(image_url) if image_url else None
+                if image_hash and image_hash not in image_by_hash:
+                    image_by_hash[image_hash] = image_url or ""
+
                 tour = Tour(
-                    country_slug=(row.get("country_slug") or "").strip(),
+                    country_slug=country_slug,
+                    country_ru=_to_ru_label(country_slug, _COUNTRY_SLUG_TO_RU),
                     base_link=(row.get("base_link") or "").strip() or None,
                     request_url=(row.get("request_url") or "").strip(),
-                    townfrom=(row.get("townfrom") or "").strip(),
+                    townfrom=townfrom,
+                    townfrom_ru=_to_ru_label(townfrom, _TOWNFROM_SLUG_TO_RU),
                     adult=_parse_int(row.get("adult")) or 0,
                     child=_parse_int(row.get("child")) or 0,
                     night_min=_parse_int(row.get("night_min")),
                     night_max=_parse_int(row.get("night_max")),
                     checkin_beg=_parse_date_yyyymmdd(row.get("checkin_beg")),
                     checkin_end=_parse_date_yyyymmdd(row.get("checkin_end")),
-                    description=(row.get("description") or "").strip(),
+                    hotel_name=(row.get("hotel_name") or "").strip(),
+                    hotel_rating=(row.get("hotel_rating") or "").strip(),
+                    hotel_stars=hotel_stars,
                     trip_dates=(row.get("trip_dates") or "").strip(),
                     nights=_parse_int(row.get("nights")),
                     room=(row.get("room") or "").strip(),
                     meal=(row.get("meal") or "").strip(),
                     placement=(row.get("placement") or "").strip(),
-                    rest_type=_parse_rest_type(row.get("raw_text"), row.get("description")),
-                    hotel_type=_parse_hotel_type(row.get("raw_text"), row.get("description")),
-                    hotel_category=_parse_hotel_category(
-                        row.get("raw_text"),
-                        row.get("placement"),
-                        row.get("room"),
-                        row.get("description"),
-                    ),
+                    rest_type=_parse_rest_type(common_desc, target_desc, row.get("raw_text")),
+                    hotel_type=direct_hotel_type
+                    or _parse_hotel_type(target_desc, common_desc, row.get("raw_text")),
+                    hotel_category=hotel_stars
+                    if hotel_stars is not None
+                    else _parse_hotel_category(row.get("raw_text"), row.get("placement"), row.get("room")),
                     price_text=price_text,
                     price_value=price_value,
                     booking_link=(row.get("booking_link") or "").strip() or None,
@@ -229,22 +315,50 @@ class Command(BaseCommand):
                 )
                 to_create.append(tour)
                 pending_amenities.append(_split_amenities(row.get("functions")))
+                pending_text_hashes.append((common_hash, target_hash, answer_hash))
+                pending_image_hashes.append(image_hash)
 
                 if len(to_create) >= batch_size:
-                    total = self._flush_batch(to_create, pending_amenities, total, limit)
+                    total = self._flush_batch(
+                        to_create,
+                        pending_amenities,
+                        pending_text_hashes,
+                        text_by_hash,
+                        pending_image_hashes,
+                        image_by_hash,
+                        total,
+                        limit,
+                    )
                     to_create.clear()
                     pending_amenities.clear()
+                    pending_text_hashes.clear()
+                    text_by_hash.clear()
+                    pending_image_hashes.clear()
+                    image_by_hash.clear()
                     if limit is not None and total >= limit:
                         return total
 
         if to_create:
-            total = self._flush_batch(to_create, pending_amenities, total, limit)
+            total = self._flush_batch(
+                to_create,
+                pending_amenities,
+                pending_text_hashes,
+                text_by_hash,
+                pending_image_hashes,
+                image_by_hash,
+                total,
+                limit,
+            )
         return total
 
     def _flush_batch(
         self,
         tours: list[Tour],
         pending_amenities: list[list[str]],
+        pending_text_hashes: list[tuple[str | None, str | None, str | None]],
+        text_by_hash: dict[str, str],
+        pending_image_hashes: list[str | None],
+        image_by_hash: dict[str, str],
         total: int,
         limit: int | None,
     ) -> int:
@@ -268,6 +382,54 @@ class Command(BaseCommand):
             )
 
         slug_to_id = dict(Amenity.objects.filter(slug__in=amenity_slugs).values_list("slug", "id"))
+
+        # 1b) ensure TourText exists (common/target descriptions)
+        text_hashes = {h for pair in pending_text_hashes for h in pair if h}
+        if text_hashes:
+            existing_text = dict(
+                TourText.objects.filter(sha256__in=list(text_hashes)).values_list("sha256", "id")
+            )
+            missing_text = text_hashes - set(existing_text.keys())
+            if missing_text:
+                TourText.objects.bulk_create(
+                    [
+                        TourText(sha256=h, content=text_by_hash.get(h, ""))
+                        for h in sorted(missing_text)
+                    ],
+                    ignore_conflicts=True,
+                )
+                existing_text = dict(
+                    TourText.objects.filter(sha256__in=list(text_hashes)).values_list("sha256", "id")
+                )
+
+            for tour, (common_hash, target_hash, answer_hash) in zip(
+                tours, pending_text_hashes, strict=False
+            ):
+                tour.common_description_id = existing_text.get(common_hash) if common_hash else None
+                tour.target_description_id = existing_text.get(target_hash) if target_hash else None
+                tour.answer_description_id = existing_text.get(answer_hash) if answer_hash else None
+
+        # 1c) ensure TourImage exists (main_image_url -> FK)
+        image_hashes = {h for h in pending_image_hashes if h}
+        if image_hashes:
+            existing_images = dict(
+                TourImage.objects.filter(sha256__in=list(image_hashes)).values_list("sha256", "id")
+            )
+            missing_images = image_hashes - set(existing_images.keys())
+            if missing_images:
+                TourImage.objects.bulk_create(
+                    [
+                        TourImage(sha256=h, url=image_by_hash.get(h, ""))
+                        for h in sorted(missing_images)
+                    ],
+                    ignore_conflicts=True,
+                )
+                existing_images = dict(
+                    TourImage.objects.filter(sha256__in=list(image_hashes)).values_list("sha256", "id")
+                )
+
+            for tour, img_hash in zip(tours, pending_image_hashes, strict=False):
+                tour.main_image_id = existing_images.get(img_hash) if img_hash else None
 
         # 2) insert tours (skip duplicates by request_url)
         with transaction.atomic():
