@@ -94,12 +94,10 @@ function openTourLink() {
   }
 }
 
+import placeholder from '../../images/tour-placeholder.jpg';
+
 const imageSrc = computed(() => {
-  if (props.tour.main_image_url) {
-    return props.tour.main_image_url;
-  } else {
-    return 'src/images/tour-placeholder.jpg';
-  }
+  return props.tour.main_image_url || placeholder;
 });
 </script>
 
