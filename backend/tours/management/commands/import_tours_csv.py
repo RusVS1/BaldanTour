@@ -9,6 +9,7 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Value, When
 from django.utils.text import slugify
 
+from tours.embeddings import get_embedder
 from tours.models import Amenity, Favorite, Tour, TourImage, TourText
 
 
@@ -38,8 +39,6 @@ def _parse_date_yyyymmdd(value: str | None) -> date | None:
 
 
 _PRICE_RE = re.compile(r"\d+")
-_STARS_RE = re.compile(r"(?<!\d)([1-5])\s*(?:\\*|\u2605)(?!\d)")
-
 
 def _parse_price(value: str | None) -> tuple[int | None, str]:
     text = (value or "").strip()
@@ -52,17 +51,8 @@ def _parse_price(value: str | None) -> tuple[int | None, str]:
         return None, text
 
 
-def _parse_hotel_category(*values: str | None) -> int | None:
-    haystack = " ".join([v for v in values if v])
-    if not haystack:
-        return None
-    m = _STARS_RE.search(haystack)
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except ValueError:
-        return None
+def _parse_hotel_category_from_csv(value: str | None) -> int | None:
+    return _parse_int(value)
 
 
 def _split_amenities(value: str | None) -> list[str]:
@@ -97,11 +87,28 @@ def _parse_hotel_type(*values: str | None) -> str:
     text = " ".join([v for v in values if v]).lower()
     if not text:
         return ""
-    if "для взрослых" in text or "adults only" in text or "adult only" in text:
-        return "для взрослых"
-    if "для детей" in text or "детск" in text:
-        return "для детей"
+    if (
+        "для взрослых" in text
+        or "взросл" in text
+        or "adults only" in text
+        or "adult only" in text
+    ):
+        return "Для взрослых"
+    if "для детей" in text or "детск" in text or "с детьми" in text or "дет" in text:
+        return "Для детей"
     return ""
+
+
+def _normalize_hotel_type(value: str | None) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    lower = value.lower()
+    if "взросл" in lower or "adults only" in lower or "adult only" in lower:
+        return "Для взрослых"
+    if "дет" in lower or "с детьми" in lower:
+        return "Для детей"
+    return value
 
 
 def _sha256_text(value: str) -> str:
@@ -126,26 +133,6 @@ def _extract_answer_description(target_desc: str) -> str:
     return extracted
 
 
-_COUNTRY_SLUG_TO_RU = {
-    "abkhazia": "Абхазия",
-    "armenia": "Армения",
-    "belarus": "Беларусь",
-    "china": "Китай",
-    "georgia": "Грузия",
-    "maldives": "Мальдивы",
-    "russia": "Россия",
-    "spain": "Испания",
-}
-
-_TOWNFROM_SLUG_TO_RU = {
-    "moskva": "Москва",
-    "moscow": "Москва",
-    "kaliningrad": "Калининград",
-    "spb": "Санкт-Петербург",
-    "sankt-peterburg": "Санкт-Петербург",
-}
-
-
 def _to_ru_label(value: str | None, mapping: dict[str, str]) -> str:
     v = (value or "").strip()
     if not v:
@@ -154,6 +141,113 @@ def _to_ru_label(value: str | None, mapping: dict[str, str]) -> str:
     if re.search(r"[А-Яа-яЁё]", v):
         return v
     return mapping.get(v, v)
+
+
+_COUNTRY_SLUG_TO_RU: dict[str, str] = {
+    "abkhazia": "Абхазия",
+    "andorra": "Андорра",
+    "argentina": "Аргентина",
+    "armenia": "Армения",
+    "aruba": "Аруба",
+    "austria": "Австрия",
+    "azerbaijan": "Азербайджан",
+    "bahrain": "Бахрейн",
+    "belarus": "Беларусь",
+    "belgium": "Бельгия",
+    "brazil": "Бразилия",
+    "bulgaria": "Болгария",
+    "cambodia": "Камбоджа",
+    "cape-verde": "Кабо-Верде",
+    "chile": "Чили",
+    "china": "Китай",
+    "china-hong-kong-sar": "Гонконг",
+    "china-macau-sar": "Макао",
+    "costa-rica": "Коста-Рика",
+    "croatia": "Хорватия",
+    "cuba": "Куба",
+    "cyprus": "Кипр",
+    "czech-republic": "Чехия",
+    "dominican-republic": "Доминикана",
+    "egypt": "Египет",
+    "fiji": "Фиджи",
+    "france": "Франция",
+    "georgia": "Грузия",
+    "germany": "Германия",
+    "greece": "Греция",
+    "hungary": "Венгрия",
+    "india": "Индия",
+    "indonesia": "Индонезия",
+    "israel": "Израиль",
+    "italy": "Италия",
+    "jamaica": "Ямайка",
+    "japan": "Япония",
+    "jordan": "Иордания",
+    "kazakhstan": "Казахстан",
+    "kenya": "Кения",
+    "kyrgyzstan": "Кыргызстан",
+    "lebanon": "Ливан",
+    "madagascar": "Мадагаскар",
+    "malaysia": "Малайзия",
+    "maldives": "Мальдивы",
+    "malta": "Мальта",
+    "mauritius": "Мавритания",
+    "mexico": "Мексика",
+    "mongolia": "Монголия",
+    "montenegro": "Черногория",
+    "morocco": "Марокко",
+    "namibia": "Намибия",
+    "nepal": "Непал",
+    "netherlands": "Нидерланды",
+    "oman": "Оман",
+    "panama": "Панама",
+    "peru": "Перу",
+    "philippines": "Филиппины",
+    "portugal": "Португалия",
+    "qatar": "Катар",
+    "russia": "Россия",
+    "saudi-arabia": "Саудовская Аравия",
+    "serbia": "Сербия",
+    "seychelles": "Сейшелы",
+    "singapore": "Сингапур",
+    "slovenia": "Словения",
+    "south-korea": "Южная Корея",
+    "spain": "Испания",
+    "sri-lanka": "Шри-Ланка",
+    "switzerland": "Швейцария",
+    "tanzania": "Танзания",
+    "thailand": "Таиланд",
+    "tunisia": "Тунис",
+    "turkey": "Турция",
+    "turkmenistan": "Туркменистан",
+    "uae": "ОАЭ",
+    "uruguay": "Уругвай",
+    "uzbekistan": "Узбекистан",
+    "vietnam": "Вьетнам",
+}
+
+
+_TOWNFROM_SLUG_TO_RU: dict[str, str] = {
+    "barnaul": "Барнаул",
+    "chelyabinsk": "Челябинск",
+    "ekaterinburg": "Екатеринбург",
+    "kaliningrad": "Калининград",
+    "kazan": "Казань",
+    "krasnodar": "Краснодар",
+    "n-novgorod": "Нижний Новгород",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "perm": "Пермь",
+    "rostov-na-donu": "Ростов-на-Дону",
+    "samara": "Самара",
+    "sankt-peterburg": "Санкт-Петербург",
+    "tyumen": "Тюмень",
+    "vladivostok": "Владивосток",
+    "volgograd": "Волгоград",
+    # legacy aliases
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "spb": "Санкт-Петербург",
+}
 
 
 class Command(BaseCommand):
@@ -251,6 +345,8 @@ class Command(BaseCommand):
         pending_image_hashes: list[str | None] = []
         image_by_hash: dict[str, str] = {}
 
+        pending_embed_texts: list[str] = []
+
         # utf-8-sig gracefully handles CSVs saved with BOM (common on Windows)
         with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -270,8 +366,8 @@ class Command(BaseCommand):
                 if answer_hash and answer_hash not in text_by_hash:
                     text_by_hash[answer_hash] = answer_desc
 
-                hotel_stars = _parse_int(row.get("hotel_stars"))
-                direct_hotel_type = (row.get("hotel_type") or "").strip()
+                hotel_category = _parse_hotel_category_from_csv(row.get("hotel_stars"))
+                direct_hotel_type = _normalize_hotel_type(row.get("hotel_type"))
 
                 country_slug = (row.get("country_slug") or "").strip()
                 townfrom = (row.get("townfrom") or "").strip()
@@ -280,6 +376,19 @@ class Command(BaseCommand):
                 image_hash = _sha256_text(image_url) if image_url else None
                 if image_hash and image_hash not in image_by_hash:
                     image_by_hash[image_hash] = image_url or ""
+
+                embed_text = " ".join(
+                    [
+                        (row.get("hotel_name") or "").strip(),
+                        (row.get("meal") or "").strip(),
+                        (row.get("placement") or "").strip(),
+                        (row.get("room") or "").strip(),
+                        common_desc,
+                        target_desc,
+                        answer_desc,
+                        (row.get("raw_text") or "").strip(),
+                    ]
+                ).strip()
 
                 tour = Tour(
                     country_slug=country_slug,
@@ -296,7 +405,6 @@ class Command(BaseCommand):
                     checkin_end=_parse_date_yyyymmdd(row.get("checkin_end")),
                     hotel_name=(row.get("hotel_name") or "").strip(),
                     hotel_rating=(row.get("hotel_rating") or "").strip(),
-                    hotel_stars=hotel_stars,
                     trip_dates=(row.get("trip_dates") or "").strip(),
                     nights=_parse_int(row.get("nights")),
                     room=(row.get("room") or "").strip(),
@@ -305,9 +413,7 @@ class Command(BaseCommand):
                     rest_type=_parse_rest_type(common_desc, target_desc, row.get("raw_text")),
                     hotel_type=direct_hotel_type
                     or _parse_hotel_type(target_desc, common_desc, row.get("raw_text")),
-                    hotel_category=hotel_stars
-                    if hotel_stars is not None
-                    else _parse_hotel_category(row.get("raw_text"), row.get("placement"), row.get("room")),
+                    hotel_category=hotel_category,
                     price_text=price_text,
                     price_value=price_value,
                     booking_link=(row.get("booking_link") or "").strip() or None,
@@ -317,6 +423,7 @@ class Command(BaseCommand):
                 pending_amenities.append(_split_amenities(row.get("functions")))
                 pending_text_hashes.append((common_hash, target_hash, answer_hash))
                 pending_image_hashes.append(image_hash)
+                pending_embed_texts.append(embed_text)
 
                 if len(to_create) >= batch_size:
                     total = self._flush_batch(
@@ -326,6 +433,7 @@ class Command(BaseCommand):
                         text_by_hash,
                         pending_image_hashes,
                         image_by_hash,
+                        pending_embed_texts,
                         total,
                         limit,
                     )
@@ -335,6 +443,7 @@ class Command(BaseCommand):
                     text_by_hash.clear()
                     pending_image_hashes.clear()
                     image_by_hash.clear()
+                    pending_embed_texts.clear()
                     if limit is not None and total >= limit:
                         return total
 
@@ -346,6 +455,7 @@ class Command(BaseCommand):
                 text_by_hash,
                 pending_image_hashes,
                 image_by_hash,
+                pending_embed_texts,
                 total,
                 limit,
             )
@@ -359,6 +469,7 @@ class Command(BaseCommand):
         text_by_hash: dict[str, str],
         pending_image_hashes: list[str | None],
         image_by_hash: dict[str, str],
+        pending_embed_texts: list[str],
         total: int,
         limit: int | None,
     ) -> int:
@@ -431,6 +542,16 @@ class Command(BaseCommand):
             for tour, img_hash in zip(tours, pending_image_hashes, strict=False):
                 tour.main_image_id = existing_images.get(img_hash) if img_hash else None
 
+        # 1d) compute embeddings (pgvector) for semantic search
+        if pending_embed_texts:
+            embedder = get_embedder()
+            try:
+                vectors = embedder.embed_texts(pending_embed_texts)
+                for tour, vec in zip(tours, vectors, strict=False):
+                    tour.embedding = vec
+            except Exception as e:
+                self.stderr.write(f"WARNING: embeddings skipped for batch: {e}")
+
         # 2) insert tours (skip duplicates by request_url)
         with transaction.atomic():
             Tour.objects.bulk_create(tours, ignore_conflicts=True)
@@ -442,24 +563,14 @@ class Command(BaseCommand):
 
             # 2b) backfill hotel_category for existing rows (bulk_create ignore_conflicts won't update)
             url_to_category = {
-                t.request_url: t.hotel_category
-                for t in tours
-                if t.request_url and t.hotel_category is not None
+                t.request_url: t.hotel_category for t in tours if t.request_url and t.hotel_category is not None
             }
             if url_to_category:
-                whens = [
-                    When(request_url=url, then=Value(category))
-                    for url, category in url_to_category.items()
-                ]
+                whens = [When(request_url=url, then=Value(category)) for url, category in url_to_category.items()]
                 Tour.objects.filter(
                     request_url__in=list(url_to_category.keys()),
                     hotel_category__isnull=True,
-                ).update(
-                    hotel_category=Case(
-                        *whens,
-                        output_field=IntegerField(),
-                    )
-                )
+                ).update(hotel_category=Case(*whens, output_field=IntegerField()))
 
             through = Tour.amenities.through
             rels = []

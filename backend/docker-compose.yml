@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    build: ./docker/db
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-tour_aggregator}
       POSTGRES_USER: ${POSTGRES_USER:-tour_aggregator}
