@@ -9,6 +9,7 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 2s
@@ -34,43 +35,6 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
-
-  scheduler:
-    build:
-      context: .
-      dockerfile: docker/scheduler/Dockerfile
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-tour_aggregator}
-      POSTGRES_USER: ${POSTGRES_USER:-tour_aggregator}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tour_aggregator}
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-      DB_WAIT_SECONDS: 60
-
-      # Scheduling
-      SCHEDULE_MODE: ${SCHEDULE_MODE:-daily}              # daily | interval
-      SCHEDULE_TZ: ${SCHEDULE_TZ:-Europe/Moscow}
-      SCHEDULE_DAILY_AT: ${SCHEDULE_DAILY_AT:-03:30}      # HH:MM
-      SCHEDULE_INTERVAL_MINUTES: ${SCHEDULE_INTERVAL_MINUTES:-1440}
-      RUN_ON_START: ${RUN_ON_START:-1}
-
-      # Parser config (all optional; defaults are set in parse_anextour)
-      ANEXTOUR_PARSER_ROOT: ${ANEXTOUR_PARSER_ROOT:-/app/data/inputs}
-      ANEXTOUR_PARSER_PATH: ${ANEXTOUR_PARSER_PATH:-/app/anextour_available_tours_example.py}
-      ANEXTOUR_HEADLESS: ${ANEXTOUR_HEADLESS:-1}
-      ANEXTOUR_TOWNFROM: ${ANEXTOUR_TOWNFROM:-moskva}
-      ANEXTOUR_COUNTRY_SLUG: ${ANEXTOUR_COUNTRY_SLUG:-}
-      ANEXTOUR_COUNTRY_SLUGS: ${ANEXTOUR_COUNTRY_SLUGS:-}
-      ANEXTOUR_ADULT_MAX: ${ANEXTOUR_ADULT_MAX:-10}
-      ANEXTOUR_CHILD_MAX: ${ANEXTOUR_CHILD_MAX:-10}
-      ANEXTOUR_STOP_FLAG: ${ANEXTOUR_STOP_FLAG:-/app/STOP_PARSING.flag}
-      ANEXTOUR_COMMIT_EVERY: ${ANEXTOUR_COMMIT_EVERY:-50}
-    depends_on:
-      db:
-        condition: service_healthy
-    volumes:
-      - .:/app
-    shm_size: "1gb"
 
 volumes:
   pgdata:
