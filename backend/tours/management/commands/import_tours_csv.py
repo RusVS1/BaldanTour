@@ -9,6 +9,7 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Value, When
 from django.utils.text import slugify
 
+from tours.embeddings import get_embedder
 from tours.models import Amenity, Favorite, Tour, TourImage, TourText
 
 
@@ -132,26 +133,6 @@ def _extract_answer_description(target_desc: str) -> str:
     return extracted
 
 
-_COUNTRY_SLUG_TO_RU = {
-    "abkhazia": "Абхазия",
-    "armenia": "Армения",
-    "belarus": "Беларусь",
-    "china": "Китай",
-    "georgia": "Грузия",
-    "maldives": "Мальдивы",
-    "russia": "Россия",
-    "spain": "Испания",
-}
-
-_TOWNFROM_SLUG_TO_RU = {
-    "moskva": "Москва",
-    "moscow": "Москва",
-    "kaliningrad": "Калининград",
-    "spb": "Санкт-Петербург",
-    "sankt-peterburg": "Санкт-Петербург",
-}
-
-
 def _to_ru_label(value: str | None, mapping: dict[str, str]) -> str:
     v = (value or "").strip()
     if not v:
@@ -160,6 +141,113 @@ def _to_ru_label(value: str | None, mapping: dict[str, str]) -> str:
     if re.search(r"[А-Яа-яЁё]", v):
         return v
     return mapping.get(v, v)
+
+
+_COUNTRY_SLUG_TO_RU: dict[str, str] = {
+    "abkhazia": "Абхазия",
+    "andorra": "Андорра",
+    "argentina": "Аргентина",
+    "armenia": "Армения",
+    "aruba": "Аруба",
+    "austria": "Австрия",
+    "azerbaijan": "Азербайджан",
+    "bahrain": "Бахрейн",
+    "belarus": "Беларусь",
+    "belgium": "Бельгия",
+    "brazil": "Бразилия",
+    "bulgaria": "Болгария",
+    "cambodia": "Камбоджа",
+    "cape-verde": "Кабо-Верде",
+    "chile": "Чили",
+    "china": "Китай",
+    "china-hong-kong-sar": "Гонконг",
+    "china-macau-sar": "Макао",
+    "costa-rica": "Коста-Рика",
+    "croatia": "Хорватия",
+    "cuba": "Куба",
+    "cyprus": "Кипр",
+    "czech-republic": "Чехия",
+    "dominican-republic": "Доминикана",
+    "egypt": "Египет",
+    "fiji": "Фиджи",
+    "france": "Франция",
+    "georgia": "Грузия",
+    "germany": "Германия",
+    "greece": "Греция",
+    "hungary": "Венгрия",
+    "india": "Индия",
+    "indonesia": "Индонезия",
+    "israel": "Израиль",
+    "italy": "Италия",
+    "jamaica": "Ямайка",
+    "japan": "Япония",
+    "jordan": "Иордания",
+    "kazakhstan": "Казахстан",
+    "kenya": "Кения",
+    "kyrgyzstan": "Кыргызстан",
+    "lebanon": "Ливан",
+    "madagascar": "Мадагаскар",
+    "malaysia": "Малайзия",
+    "maldives": "Мальдивы",
+    "malta": "Мальта",
+    "mauritius": "Мавритания",
+    "mexico": "Мексика",
+    "mongolia": "Монголия",
+    "montenegro": "Черногория",
+    "morocco": "Марокко",
+    "namibia": "Намибия",
+    "nepal": "Непал",
+    "netherlands": "Нидерланды",
+    "oman": "Оман",
+    "panama": "Панама",
+    "peru": "Перу",
+    "philippines": "Филиппины",
+    "portugal": "Португалия",
+    "qatar": "Катар",
+    "russia": "Россия",
+    "saudi-arabia": "Саудовская Аравия",
+    "serbia": "Сербия",
+    "seychelles": "Сейшелы",
+    "singapore": "Сингапур",
+    "slovenia": "Словения",
+    "south-korea": "Южная Корея",
+    "spain": "Испания",
+    "sri-lanka": "Шри-Ланка",
+    "switzerland": "Швейцария",
+    "tanzania": "Танзания",
+    "thailand": "Таиланд",
+    "tunisia": "Тунис",
+    "turkey": "Турция",
+    "turkmenistan": "Туркменистан",
+    "uae": "ОАЭ",
+    "uruguay": "Уругвай",
+    "uzbekistan": "Узбекистан",
+    "vietnam": "Вьетнам",
+}
+
+
+_TOWNFROM_SLUG_TO_RU: dict[str, str] = {
+    "barnaul": "Барнаул",
+    "chelyabinsk": "Челябинск",
+    "ekaterinburg": "Екатеринбург",
+    "kaliningrad": "Калининград",
+    "kazan": "Казань",
+    "krasnodar": "Краснодар",
+    "n-novgorod": "Нижний Новгород",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "perm": "Пермь",
+    "rostov-na-donu": "Ростов-на-Дону",
+    "samara": "Самара",
+    "sankt-peterburg": "Санкт-Петербург",
+    "tyumen": "Тюмень",
+    "vladivostok": "Владивосток",
+    "volgograd": "Волгоград",
+    # legacy aliases
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "spb": "Санкт-Петербург",
+}
 
 
 class Command(BaseCommand):
@@ -257,6 +345,8 @@ class Command(BaseCommand):
         pending_image_hashes: list[str | None] = []
         image_by_hash: dict[str, str] = {}
 
+        pending_embed_texts: list[str] = []
+
         # utf-8-sig gracefully handles CSVs saved with BOM (common on Windows)
         with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -286,6 +376,19 @@ class Command(BaseCommand):
                 image_hash = _sha256_text(image_url) if image_url else None
                 if image_hash and image_hash not in image_by_hash:
                     image_by_hash[image_hash] = image_url or ""
+
+                embed_text = " ".join(
+                    [
+                        (row.get("hotel_name") or "").strip(),
+                        (row.get("meal") or "").strip(),
+                        (row.get("placement") or "").strip(),
+                        (row.get("room") or "").strip(),
+                        common_desc,
+                        target_desc,
+                        answer_desc,
+                        (row.get("raw_text") or "").strip(),
+                    ]
+                ).strip()
 
                 tour = Tour(
                     country_slug=country_slug,
@@ -320,6 +423,7 @@ class Command(BaseCommand):
                 pending_amenities.append(_split_amenities(row.get("functions")))
                 pending_text_hashes.append((common_hash, target_hash, answer_hash))
                 pending_image_hashes.append(image_hash)
+                pending_embed_texts.append(embed_text)
 
                 if len(to_create) >= batch_size:
                     total = self._flush_batch(
@@ -329,6 +433,7 @@ class Command(BaseCommand):
                         text_by_hash,
                         pending_image_hashes,
                         image_by_hash,
+                        pending_embed_texts,
                         total,
                         limit,
                     )
@@ -338,6 +443,7 @@ class Command(BaseCommand):
                     text_by_hash.clear()
                     pending_image_hashes.clear()
                     image_by_hash.clear()
+                    pending_embed_texts.clear()
                     if limit is not None and total >= limit:
                         return total
 
@@ -349,6 +455,7 @@ class Command(BaseCommand):
                 text_by_hash,
                 pending_image_hashes,
                 image_by_hash,
+                pending_embed_texts,
                 total,
                 limit,
             )
@@ -362,6 +469,7 @@ class Command(BaseCommand):
         text_by_hash: dict[str, str],
         pending_image_hashes: list[str | None],
         image_by_hash: dict[str, str],
+        pending_embed_texts: list[str],
         total: int,
         limit: int | None,
     ) -> int:
@@ -433,6 +541,16 @@ class Command(BaseCommand):
 
             for tour, img_hash in zip(tours, pending_image_hashes, strict=False):
                 tour.main_image_id = existing_images.get(img_hash) if img_hash else None
+
+        # 1d) compute embeddings (pgvector) for semantic search
+        if pending_embed_texts:
+            embedder = get_embedder()
+            try:
+                vectors = embedder.embed_texts(pending_embed_texts)
+                for tour, vec in zip(tours, vectors, strict=False):
+                    tour.embedding = vec
+            except Exception as e:
+                self.stderr.write(f"WARNING: embeddings skipped for batch: {e}")
 
         # 2) insert tours (skip duplicates by request_url)
         with transaction.atomic():

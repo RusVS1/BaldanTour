@@ -78,6 +78,16 @@ Smoke-test (импорт ограниченного числа строк):
 
 - `GET /api/fx/rub/` — курс RUB к USD/EUR (онлайн-источник)
 
+## AI поиск (pgvector)
+
+- `POST /api/ai/search/` — семантический поиск по турам (эмбеддинги + pgvector)
+
+Переменные окружения:
+- `EMBEDDINGS_PROVIDER` — `openai` или `dummy` (по умолчанию `openai`, если задан `OPENAI_API_KEY`, иначе `dummy`)
+- `OPENAI_API_KEY` — ключ для генерации эмбеддингов (multilingual модель)
+- `OPENAI_EMBEDDING_MODEL` — по умолчанию `text-embedding-3-small`
+- `EMBEDDING_DIM` — размерность вектора (по умолчанию `1536`, должна совпадать с моделью)
+
 ## Дамп/восстановление PostgreSQL
 
 Рекомендованный способ, чтобы не повредить бинарный архив:
@@ -89,4 +99,3 @@ Smoke-test (импорт ограниченного числа строк):
 2) Восстановить у другого человека:
 - `docker cp ./db.dump touragg-db-1:/dump.dump`
 - `docker exec -it touragg-db-1 pg_restore --clean --if-exists -U "$POSTGRES_USER" -d "$POSTGRES_DB" /dump.dump`
-

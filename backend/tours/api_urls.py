@@ -5,6 +5,7 @@ from .fx_api import RubFxRatesAPI
 
 urlpatterns = [
     path("tours/", api.TourSearchAPI.as_view(), name="api_tour_search"),
+    path("ai/search/", api.AISearchAPI.as_view(), name="api_ai_search"),
     path("filters/rest-type/", api.FilterRestTypeAPI.as_view(), name="api_filter_rest_type"),
     path("filters/hotel-category/", api.FilterHotelCategoryAPI.as_view(), name="api_filter_hotel_category"),
     path("filters/hotel-type/", api.FilterHotelTypeAPI.as_view(), name="api_filter_hotel_type"),
