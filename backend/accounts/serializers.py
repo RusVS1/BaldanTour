@@ -10,9 +10,9 @@ class RegisterSerializer(serializers.Serializer):
     def validate_username(self, value: str) -> str:
         value = value.strip()
         if not value:
-            raise serializers.ValidationError("Username is required.")
+            raise serializers.ValidationError("Введите пользователя.")
         if User.objects.filter(username=value).exists():
-            raise serializers.ValidationError("Username already exists.")
+            raise serializers.ValidationError("Пользователь уже существует.")
         return value
 
     def validate(self, attrs):
@@ -37,9 +37,9 @@ class LoginSerializer(serializers.Serializer):
             password=attrs.get("password") or "",
         )
         if user is None:
-            raise serializers.ValidationError("Invalid username/password.")
+            raise serializers.ValidationError("Неверный пользователь\пароль.")
         if not user.is_active:
-            raise serializers.ValidationError("User is inactive.")
+            raise serializers.ValidationError("Пользователь не активен.")
         attrs["user"] = user
         return attrs
 
