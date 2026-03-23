@@ -1,0 +1,40 @@
+services:
+  db:
+    build: ./docker/db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tour_aggregator}
+      POSTGRES_USER: ${POSTGRES_USER:-tour_aggregator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tour_aggregator}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build: .
+    environment:
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-secret-key}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      POSTGRES_DB: ${POSTGRES_DB:-tour_aggregator}
+      POSTGRES_USER: ${POSTGRES_USER:-tour_aggregator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tour_aggregator}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      DB_WAIT_SECONDS: 60
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+volumes:
+  pgdata:
