@@ -4,7 +4,7 @@
     style="max-width: 1024px; width: 90%"
   >
     <div class="col-6 gt-sm">
-      <q-img src="src/images/authphoto.png" ratio="1" class="border-radius-md" />
+      <q-img src="../../images/authphoto.png" ratio="1" class="border-radius-md" />
     </div>
 
     <div class="col-12 col-md-6 flex column justify-center q-pa-xl">
