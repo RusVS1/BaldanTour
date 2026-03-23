@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 class Amenity(models.Model):
     slug = models.SlugField(max_length=64, unique=True)
@@ -13,7 +14,7 @@ class Tour(models.Model):
     country_slug = models.CharField(max_length=64, db_index=True)
 
     base_link = models.URLField(max_length=2000, null=True, blank=True)
-    request_url = models.URLField(max_length=2000, unique=True)
+    request_url = models.URLField(max_length=2000, db_index=True)
 
     townfrom = models.CharField(max_length=128, blank=True, db_index=True)
     adult = models.PositiveSmallIntegerField(default=1, db_index=True)
@@ -32,6 +33,8 @@ class Tour(models.Model):
     meal = models.CharField(max_length=128, blank=True, db_index=True)
     placement = models.CharField(max_length=255, blank=True, db_index=True)
 
+    rest_type = models.CharField(max_length=32, blank=True, db_index=True)
+    hotel_type = models.CharField(max_length=32, blank=True, db_index=True)
     hotel_category = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)
 
     price_text = models.CharField(max_length=64, blank=True)
@@ -50,6 +53,13 @@ class Tour(models.Model):
         indexes = [
             models.Index(fields=["price_value", "country_slug"]),
             models.Index(fields=["checkin_beg", "checkin_end"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["booking_link"],
+                condition=Q(booking_link__isnull=False),
+                name="uniq_tour_booking_link",
+            ),
         ]
 
     def __str__(self) -> str:

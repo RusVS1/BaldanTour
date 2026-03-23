@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Value, When
 from django.utils.text import slugify
 
-from tours.models import Amenity, Tour
+from tours.models import Amenity, Favorite, Tour
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -37,7 +37,7 @@ def _parse_date_yyyymmdd(value: str | None) -> date | None:
 
 
 _PRICE_RE = re.compile(r"\d+")
-_STARS_RE = re.compile(r"(?<!\d)([1-5])\s*(?:\\*|★)(?!\d)")
+_STARS_RE = re.compile(r"(?<!\d)([1-5])\s*(?:\\*|\u2605)(?!\d)")
 
 
 def _parse_price(value: str | None) -> tuple[int | None, str]:
@@ -81,10 +81,37 @@ def _split_amenities(value: str | None) -> list[str]:
     return result
 
 
+def _parse_rest_type(*values: str | None) -> str:
+    text = " ".join([v for v in values if v]).lower()
+    if not text:
+        return ""
+    if "пляж" in text or "море" in text:
+        return "пляжный"
+    if "город" in text or "экскурс" in text:
+        return "городской"
+    return ""
+
+
+def _parse_hotel_type(*values: str | None) -> str:
+    text = " ".join([v for v in values if v]).lower()
+    if not text:
+        return ""
+    if "для взрослых" in text or "adults only" in text or "adult only" in text:
+        return "для взрослых"
+    if "для детей" in text or "детск" in text:
+        return "для детей"
+    return ""
+
+
 class Command(BaseCommand):
-    help = "Import tours from CSV files in 'Распаршенные страны' folder."
+    help = "Import tours from CSV files."
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            "--csv-file",
+            default=None,
+            help="Path to a single CSV file to import (overrides --csv-dir).",
+        )
         parser.add_argument(
             "--csv-dir",
             default=None,
@@ -102,25 +129,54 @@ class Command(BaseCommand):
             default=1000,
             help="Bulk insert batch size.",
         )
+        parser.add_argument(
+            "--truncate",
+            action="store_true",
+            help="Delete existing tours/amenities/favorites before import.",
+        )
 
     def handle(self, *args, **options):
-        if options["csv_dir"]:
-            base_dir = Path(options["csv_dir"])
+        csv_file = options.get("csv_file")
+        if csv_file:
+            csv_path = Path(csv_file)
+            if not csv_path.exists():
+                raise SystemExit(f"CSV file not found: {csv_path}")
+            csv_files = [csv_path]
+            base_dir = None
         else:
-            cwd = Path.cwd()
-            if (cwd / "parsed_country").exists():
-                base_dir = cwd / "parsed_country"
+            if options["csv_dir"]:
+                base_dir = Path(options["csv_dir"])
             else:
-                base_dir = cwd / "Распаршенные страны"
+                cwd = Path.cwd()
+                # Prefer current dir if it contains CSV examples (e.g. belarus in repo root).
+                if list(cwd.glob("anextour_available_tours_*.csv")):
+                    base_dir = cwd
+                elif (cwd / "parsed_country").exists():
+                    base_dir = cwd / "parsed_country"
+                else:
+                    base_dir = cwd / "Распаршенные страны"
         limit = options["limit"]
         batch_size = options["batch_size"]
+        truncate = bool(options.get("truncate"))
 
-        if not base_dir.exists():
-            raise SystemExit(f"CSV dir not found: {base_dir}")
+        if truncate:
+            self.stdout.write("Truncating existing tours data...")
+            with transaction.atomic():
+                Favorite.objects.all().delete()
+                Tour.amenities.through.objects.all().delete()
+                Amenity.objects.all().delete()
+                Tour.objects.all().delete()
 
-        csv_files = sorted(base_dir.glob("anextour_available_tours_*.csv"))
-        if not csv_files:
-            raise SystemExit(f"No CSV files found in: {base_dir}")
+        if base_dir is not None:
+            if not base_dir.exists():
+                raise SystemExit(f"CSV dir not found: {base_dir}")
+
+            csv_files = sorted(base_dir.glob("anextour_available_tours_*.csv"))
+            if not csv_files:
+                # fallback: any csv
+                csv_files = sorted(base_dir.glob("*.csv"))
+            if not csv_files:
+                raise SystemExit(f"No CSV files found in: {base_dir}")
 
         total = 0
         for csv_path in csv_files:
@@ -135,7 +191,8 @@ class Command(BaseCommand):
         to_create: list[Tour] = []
         pending_amenities: list[list[str]] = []
 
-        with csv_path.open("r", encoding="utf-8", newline="") as f:
+        # utf-8-sig gracefully handles CSVs saved with BOM (common on Windows)
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 price_value, price_text = _parse_price(row.get("price"))
@@ -157,6 +214,8 @@ class Command(BaseCommand):
                     room=(row.get("room") or "").strip(),
                     meal=(row.get("meal") or "").strip(),
                     placement=(row.get("placement") or "").strip(),
+                    rest_type=_parse_rest_type(row.get("raw_text"), row.get("description")),
+                    hotel_type=_parse_hotel_type(row.get("raw_text"), row.get("description")),
                     hotel_category=_parse_hotel_category(
                         row.get("raw_text"),
                         row.get("placement"),
