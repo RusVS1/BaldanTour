@@ -726,7 +726,38 @@ class AISearchMetaSerializer(serializers.Serializer):
     embedding_dim = serializers.IntegerField()
 
 
-class AISearchResultSerializer(TourSearchResponseSerializer):
+class AISearchResultSerializer(serializers.Serializer):
+    # Same core fields as /api/tours/ + expanded tour details
+    id = serializers.IntegerField()
+    request_url = serializers.CharField(allow_blank=True)
+    base_link = serializers.CharField(allow_blank=True, allow_null=True)
+
+    hotel_slug = serializers.CharField()
+    hotel_name = serializers.CharField()
+    hotel_rating = serializers.CharField(allow_blank=True)
+
+    room = serializers.CharField(allow_blank=True)
+    placement = serializers.CharField(allow_blank=True)
+    trip_dates = serializers.CharField(allow_blank=True)
+
+    # Pricing
+    price_total = serializers.IntegerField(allow_null=True)
+    price_text = serializers.CharField(allow_blank=True)
+    price_per_person = serializers.IntegerField(allow_null=True)
+
+    meal = serializers.CharField(allow_blank=True, allow_null=True)
+    meal_extension = serializers.CharField(allow_blank=True)
+
+    main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
+    buy_link = serializers.CharField(allow_blank=True, allow_null=True)
+
+    common_description = serializers.CharField(allow_blank=True)
+    target_description = serializers.CharField(allow_blank=True)
+    answer_description = serializers.CharField(allow_blank=True)
+
+    amenities = serializers.ListField(child=serializers.CharField(), required=False)
+
+    meta = serializers.DictField()
     score = serializers.FloatField()
 
 
@@ -761,21 +792,36 @@ class AISearchAPI(APIView):
                     "results": [
                         {
                             "id": 123,
+                            "request_url": "https://anextour.ru/tours/abkhazia/...&TOWNFROM=moskva",
+                            "base_link": "https://anextour.ru/tours/abkhazia/a-v-sokol-family-29767",
                             "hotel_slug": "a-v-sokol-family-29767",
                             "hotel_name": "A. V. Sokol Family.",
                             "hotel_rating": "",
-                            "hotel_type": "Для детей",
+                            "room": "Standart",
+                            "placement": "",
+                            "trip_dates": "28 мар - 30 мар",
+                            "price_total": 21635,
+                            "price_text": "21 635 ₽",
+                            "price_per_person": 21635,
                             "meal": "BB",
                             "meal_extension": "Завтрак",
                             "main_image_url": "https://files.anextour.ru/...",
-                            "price_per_person": 21635,
                             "buy_link": "https://anextour.ru/booking/...",
                             "common_description": "",
                             "target_description": "",
                             "answer_description": "",
+                            "amenities": ["wifi", "balcony"],
                             "meta": {
                                 "townfrom": "Москва",
                                 "country_slug": "Абхазия",
+                                "townfrom_value": "moskva",
+                                "country_value": "abkhazia",
+                                "departure_from": "2026-03-21",
+                                "departure_to": "2026-03-28",
+                                "nights_min": 1,
+                                "nights_max": 8,
+                                "child": 0,
+                                "adult": 1,
                                 "rest_type": None,
                                 "hotel_type": "Для детей",
                                 "hotel_category": 2,
@@ -809,6 +855,7 @@ class AISearchAPI(APIView):
             .annotate(distance=CosineDistance("embedding", qvec))
             .order_by("distance", "id")
             .select_related("common_description", "target_description", "answer_description", "main_image")
+            .prefetch_related("amenities")
         )
 
         tours = list(qs[:limit])
@@ -820,9 +867,16 @@ class AISearchAPI(APIView):
             results.append(
                 {
                     "id": t.id,
+                    "request_url": t.request_url or "",
+                    "base_link": t.base_link,
                     "hotel_slug": _hotel_name_from_base_link(t.base_link),
                     "hotel_name": t.hotel_name or _hotel_name_from_base_link(t.base_link),
                     "hotel_rating": t.hotel_rating or "",
+                    "room": t.room or "",
+                    "placement": t.placement or "",
+                    "trip_dates": t.trip_dates or "",
+                    "price_total": t.price_value,
+                    "price_text": t.price_text or "",
                     "hotel_type": t.hotel_type or None,
                     "meal": t.meal or None,
                     "meal_extension": _meal_extension(t.meal),
@@ -832,6 +886,7 @@ class AISearchAPI(APIView):
                     "common_description": _text_content(t.common_description),
                     "target_description": _text_content(t.target_description),
                     "answer_description": _text_content(t.answer_description),
+                    "amenities": [a.slug for a in t.amenities.all()],
                     "meta": {
                         "townfrom": (t.townfrom_ru or "").strip()
                         or _label_from_value(t.townfrom or "", TOWNFROM_SLUG_TO_RU),
@@ -839,6 +894,12 @@ class AISearchAPI(APIView):
                         or _label_from_value(t.country_slug or "", COUNTRY_SLUG_TO_RU),
                         "townfrom_value": (t.townfrom or "").strip(),
                         "country_value": (t.country_slug or "").strip(),
+                        "departure_from": t.checkin_beg.isoformat() if t.checkin_beg else None,
+                        "departure_to": t.checkin_end.isoformat() if t.checkin_end else None,
+                        "nights_min": t.night_min if t.night_min is not None else t.nights,
+                        "nights_max": t.night_max if t.night_max is not None else t.nights,
+                        "child": t.child,
+                        "adult": t.adult,
                         "rest_type": t.rest_type or None,
                         "hotel_type": t.hotel_type or None,
                         "hotel_category": t.hotel_category,
