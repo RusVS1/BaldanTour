@@ -1,6 +1,10 @@
-Запуск проекта
-Для локального тестирования:
-в корне проекта создайте .env файл со содержимым
+# Запуск проекта
+
+## Для локального тестирования
+
+В корне проекта создайте файл `.env` со следующим содержимым:
+
+```env
 POSTGRES_DB=tour_aggregator
 POSTGRES_USER=tour_aggregator
 POSTGRES_PASSWORD=tour_aggregator
@@ -10,12 +14,6 @@ POSTGRES_PORT=5432
 DJANGO_SECRET_KEY=change-me
 DJANGO_DEBUG=1
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
-
-SCHEDULE_MODE=daily
-SCHEDULE_TZ=Europe/Moscow
-SCHEDULE_DAILY_AT=03:30
-SCHEDULE_INTERVAL_MINUTES=1440
-RUN_ON_START=1
 
 ANEXTOUR_PARSER_ROOT=/app/data/inputs
 ANEXTOUR_PARSER_PATH=/app/anextour_available_tours_example.py
@@ -27,11 +25,22 @@ ANEXTOUR_ADULT_MAX=10
 ANEXTOUR_CHILD_MAX=10
 ANEXTOUR_STOP_FLAG=/app/STOP_PARSING.flag
 ANEXTOUR_COMMIT_EVERY=50
+```
 
-Соберетие и запустите проект
+---
+
+## Сборка и запуск проекта
+
+```bash
 docker-compose up -d --build
+```
 
-Сайте будет доступен по 
-http:/localhost
-сваггер на 
-http:/localhost/api/docs
+---
+
+## Доступ к сервисам
+
+- Основной сайт:  
+  http://localhost
+
+- Swagger-документация API:  
+  http://localhost/api/docs

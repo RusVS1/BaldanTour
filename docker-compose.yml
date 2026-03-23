@@ -55,33 +55,49 @@ services:
   parser-builder:
     build:
       context: ./parser
+      dockerfile: Dockerfile
       args:
-        POSTGRES_DB: ${POSTGRES_DB}
-        POSTGRES_USER: ${POSTGRES_USER}
-        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        POSTGRES_DB: ${POSTGRES_DB:-tour_aggregator}
+        POSTGRES_USER: ${POSTGRES_USER:-tour_aggregator}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tour_aggregator}
         POSTGRES_HOST: db
         POSTGRES_PORT: 5432
     image: parser-app:latest
-    command: echo "Успешно собрано!"
+    command: echo "Образ parser-app:latest собран"
+    profiles:
+      - build
 
   scheduler:
     image: mcuadros/ofelia:latest
-    env_file:
-      - .env
-    container_name: parser-app-scheduler
-    depends_on:
-      - db
-      - parser-builder
+    container_name: parser-scheduler
+    restart: unless-stopped
     command: daemon --docker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - TZ=Europe/Moscow
     labels:
-      ofelia.job-run.parser.schedule: "0 26 * * * *"
+      ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
       ofelia.job-run.parser.image: "parser-app:latest"
-      ofelia.job-run.parser.command: "python /app/main.py --headless --reset-output --out-csv /tmp/output.csv --out-json /tmp/output.json --stop-flag /tmp/STOP.flag"
+      ofelia.job-run.parser.command: >
+        python /app/main.py
+        --headless
+        --reset-output
+        --root /app
+        --out-csv /app/output/result.csv
+        --out-json /app/output/result.json
+        --stop-flag /app/output/STOP.flag
+        --max-hotels 5
+        --max-towns 3
+        --max-countries 2
       ofelia.job-run.parser.autoRemove: "true"
       ofelia.job-run.parser.no-overlap: "true"
-      ofelia.job-run.parser.runtime-flags: "--shm-size=1gb --init"
+      ofelia.job-run.parser.runtime-flags: >
+        --shm-size=2gb
+        --init
+        --env TZ=Europe/Moscow
+      ofelia.job-run.parser.notify.success: "true"
+      ofelia.job-run.parser.notify.error: "true"
 
 volumes:
   pgdata:

@@ -1,5 +1,4 @@
-﻿#!/usr/bin/env python3
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import asyncio
@@ -20,7 +19,6 @@ from playwright.async_api import async_playwright
 
 NIGHT_RANGES = [(1, 8), (9, 16), (17, 24), (25, 28)]
 
-# Defaults embedded in code (so container runs do not depend on external CSV/text files).
 DEFAULT_TOWNS = [
     "moskva",
     "sankt-peterburg",
@@ -123,7 +121,6 @@ DEFAULT_COUNTRY_SLUGS = [
     "vietnam",
 ]
 
-# Increase CSV field size limit for large "details" cells.
 try:
     csv.field_size_limit(sys.maxsize)
 except OverflowError:
@@ -271,7 +268,6 @@ def country_description_from_rows(rows: list[dict[str, str]], country_slug: str,
         if c != country_slug or not has_city:
             continue
 
-        # Prefer details JSON body text/description when available
         details = row.get("details", "")
         if details:
             try:
@@ -284,7 +280,6 @@ def country_description_from_rows(rows: list[dict[str, str]], country_slug: str,
             except Exception:
                 pass
 
-        # Fallback raw_text column
         seg = extract_description_segment(row.get("raw_text", ""))
         if seg:
             return seg
@@ -363,7 +358,6 @@ async def discover_base_links_for_country(page, country_slug: str, *, max_links:
             continue
         if parts[1].lower() != country_slug.lower():
             continue
-        # ensure no query, no fragment: base link only
         if p.query or p.fragment:
             continue
         clean = urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
@@ -415,7 +409,6 @@ def collect_country_links(rows: list[dict[str, str]], city_names: set[str]) -> d
         if not country:
             continue
         if has_city:
-            # skip city-prefixed links for base hotel list
             continue
         links_by_country.setdefault(country, []).append(link)
 
@@ -712,7 +705,6 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
                     pass
                 await page.wait_for_timeout(700)
 
-        # Build target_description from two tabs: "Информация" + "Услуги и питание"
         info_text = ""
         services_text = ""
         try:
@@ -838,7 +830,6 @@ def materialize_json_from_jsonl(jsonl_path: Path, json_out: Path) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
-    # Default mode: fully self-contained discovery (no CSV required).
     rows: list[dict[str, str]] = []
     city_names: set[str] = set(DEFAULT_TOWNS)
     links_by_country: dict[str, list[str]] = {}
@@ -854,7 +845,7 @@ async def run(args: argparse.Namespace) -> None:
     json_out = Path(args.out_json)
     jsonl_out = Path(str(json_out) + ".jsonl")
 
-    stop_flag = Path(args.stop_flag) if args.stop_flag else (root / "STOP_PARSING.flag")
+    stop_flag = Path(args.stop_flag) if args.stop_flag else (Path(args.root) / "STOP_PARSING.flag")
     flush_interval = max(10, args.flush_interval_sec)
 
     if args.reset_output:
@@ -1107,8 +1098,11 @@ async def run_core(
     return stop_requested
 
 def build_args() -> argparse.Namespace:
+    import os
+    default_root = "/app" if os.getenv("DOCKER_ENV") else str(Path.cwd())
+    
     p = argparse.ArgumentParser(description="Generate available tours csv/json for all countries")
-    p.add_argument("--root", default=r"D:\asoiu")
+    p.add_argument("--root", default=default_root)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--timeout-ms", type=int, default=30000)
     p.add_argument("--start-checkin-beg", default="20260313")
@@ -1121,8 +1115,8 @@ def build_args() -> argparse.Namespace:
     p.add_argument("--max-countries", type=int, default=0, help="Limit countries (0 = all)")
     p.add_argument("--country-slug", default="", help="Parse only one country slug")
     p.add_argument("--country-slugs", default="", help="Comma-separated country slugs to parse")
-    p.add_argument("--out-json", default=r"D:\asoiu\anextour_available_tours_all_countries_example.json")
-    p.add_argument("--out-csv", default=r"D:\asoiu\anextour_available_tours_all_countries_example.csv")
+    p.add_argument("--out-json", default="/app/output/result.json")
+    p.add_argument("--out-csv", default="/app/output/result.csv")
     p.add_argument("--adult-max", type=int, default=10, help="Max adults (start is always 1)")
     p.add_argument("--child-max", type=int, default=10, help="Max children (start is always 0)")
     p.add_argument("--flush-interval-sec", type=int, default=120, help="Flush partial results every N seconds")
