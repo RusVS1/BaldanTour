@@ -38,8 +38,6 @@ def _parse_date_yyyymmdd(value: str | None) -> date | None:
 
 
 _PRICE_RE = re.compile(r"\d+")
-_STARS_RE = re.compile(r"(?<!\d)([1-5])\s*(?:\\*|\u2605)(?!\d)")
-
 
 def _parse_price(value: str | None) -> tuple[int | None, str]:
     text = (value or "").strip()
@@ -52,17 +50,8 @@ def _parse_price(value: str | None) -> tuple[int | None, str]:
         return None, text
 
 
-def _parse_hotel_category(*values: str | None) -> int | None:
-    haystack = " ".join([v for v in values if v])
-    if not haystack:
-        return None
-    m = _STARS_RE.search(haystack)
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except ValueError:
-        return None
+def _parse_hotel_category_from_csv(value: str | None) -> int | None:
+    return _parse_int(value)
 
 
 def _split_amenities(value: str | None) -> list[str]:
@@ -270,7 +259,7 @@ class Command(BaseCommand):
                 if answer_hash and answer_hash not in text_by_hash:
                     text_by_hash[answer_hash] = answer_desc
 
-                hotel_stars = _parse_int(row.get("hotel_stars"))
+                hotel_category = _parse_hotel_category_from_csv(row.get("hotel_stars"))
                 direct_hotel_type = (row.get("hotel_type") or "").strip()
 
                 country_slug = (row.get("country_slug") or "").strip()
@@ -296,7 +285,6 @@ class Command(BaseCommand):
                     checkin_end=_parse_date_yyyymmdd(row.get("checkin_end")),
                     hotel_name=(row.get("hotel_name") or "").strip(),
                     hotel_rating=(row.get("hotel_rating") or "").strip(),
-                    hotel_stars=hotel_stars,
                     trip_dates=(row.get("trip_dates") or "").strip(),
                     nights=_parse_int(row.get("nights")),
                     room=(row.get("room") or "").strip(),
@@ -305,9 +293,7 @@ class Command(BaseCommand):
                     rest_type=_parse_rest_type(common_desc, target_desc, row.get("raw_text")),
                     hotel_type=direct_hotel_type
                     or _parse_hotel_type(target_desc, common_desc, row.get("raw_text")),
-                    hotel_category=hotel_stars
-                    if hotel_stars is not None
-                    else _parse_hotel_category(row.get("raw_text"), row.get("placement"), row.get("room")),
+                    hotel_category=hotel_category,
                     price_text=price_text,
                     price_value=price_value,
                     booking_link=(row.get("booking_link") or "").strip() or None,
@@ -442,24 +428,14 @@ class Command(BaseCommand):
 
             # 2b) backfill hotel_category for existing rows (bulk_create ignore_conflicts won't update)
             url_to_category = {
-                t.request_url: t.hotel_category
-                for t in tours
-                if t.request_url and t.hotel_category is not None
+                t.request_url: t.hotel_category for t in tours if t.request_url and t.hotel_category is not None
             }
             if url_to_category:
-                whens = [
-                    When(request_url=url, then=Value(category))
-                    for url, category in url_to_category.items()
-                ]
+                whens = [When(request_url=url, then=Value(category)) for url, category in url_to_category.items()]
                 Tour.objects.filter(
                     request_url__in=list(url_to_category.keys()),
                     hotel_category__isnull=True,
-                ).update(
-                    hotel_category=Case(
-                        *whens,
-                        output_field=IntegerField(),
-                    )
-                )
+                ).update(hotel_category=Case(*whens, output_field=IntegerField()))
 
             through = Tour.amenities.through
             rels = []

@@ -97,7 +97,6 @@ class TourSearchResponseSerializer(serializers.Serializer):
     hotel_slug = serializers.CharField()
     hotel_name = serializers.CharField()
     hotel_rating = serializers.CharField(allow_blank=True)
-    hotel_stars = serializers.IntegerField(allow_null=True)
     hotel_type = serializers.CharField(allow_blank=True, allow_null=True)
     meal = serializers.CharField(allow_blank=True, allow_null=True)
     main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
@@ -323,7 +322,6 @@ class TourSearchAPI(APIView):
                     "hotel_slug": _hotel_name_from_base_link(tour.base_link),
                     "hotel_name": tour.hotel_name or _hotel_name_from_base_link(tour.base_link),
                     "hotel_rating": tour.hotel_rating or "",
-                    "hotel_stars": tour.hotel_stars,
                     "hotel_type": tour.hotel_type or None,
                     "meal": tour.meal or None,
                     "main_image_url": tour.main_image.url if tour.main_image else None,
@@ -480,7 +478,6 @@ class FavoriteToursAPI(APIView):
                 "hotel_slug": _hotel_name_from_base_link(t.base_link),
                 "hotel_name": t.hotel_name or _hotel_name_from_base_link(t.base_link),
                 "hotel_rating": t.hotel_rating or "",
-                "hotel_stars": t.hotel_stars,
                 "hotel_type": t.hotel_type or None,
                 "meal": t.meal or None,
                 "main_image_url": t.main_image.url if t.main_image else None,

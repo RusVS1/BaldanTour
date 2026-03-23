@@ -45,7 +45,6 @@ class Tour(models.Model):
 
     hotel_name = models.CharField(max_length=255, blank=True, db_index=True)
     hotel_rating = models.CharField(max_length=32, blank=True)
-    hotel_stars = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)
     main_image = models.ForeignKey(
         TourImage, null=True, blank=True, on_delete=models.SET_NULL, related_name="tours"
     )
