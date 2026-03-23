@@ -2,6 +2,22 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
+
+class TourText(models.Model):
+    sha256 = models.CharField(max_length=64, unique=True)
+    content = models.TextField()
+
+    def __str__(self) -> str:
+        return f"{self.sha256[:8]}…"
+
+class TourImage(models.Model):
+    sha256 = models.CharField(max_length=64, unique=True)
+    url = models.URLField(max_length=2000)
+
+    def __str__(self) -> str:
+        return self.url
+
+
 class Amenity(models.Model):
     slug = models.SlugField(max_length=64, unique=True)
     name = models.CharField(max_length=128)
@@ -12,11 +28,13 @@ class Amenity(models.Model):
 
 class Tour(models.Model):
     country_slug = models.CharField(max_length=64, db_index=True)
+    country_ru = models.CharField(max_length=128, blank=True, db_index=True)
 
     base_link = models.URLField(max_length=2000, null=True, blank=True)
     request_url = models.URLField(max_length=2000, db_index=True)
 
     townfrom = models.CharField(max_length=128, blank=True, db_index=True)
+    townfrom_ru = models.CharField(max_length=128, blank=True, db_index=True)
     adult = models.PositiveSmallIntegerField(default=1, db_index=True)
     child = models.PositiveSmallIntegerField(default=0, db_index=True)
 
@@ -25,7 +43,23 @@ class Tour(models.Model):
     checkin_beg = models.DateField(null=True, blank=True, db_index=True)
     checkin_end = models.DateField(null=True, blank=True, db_index=True)
 
-    description = models.TextField(blank=True)
+    hotel_name = models.CharField(max_length=255, blank=True, db_index=True)
+    hotel_rating = models.CharField(max_length=32, blank=True)
+    hotel_stars = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)
+    main_image = models.ForeignKey(
+        TourImage, null=True, blank=True, on_delete=models.SET_NULL, related_name="tours"
+    )
+
+    common_description = models.ForeignKey(
+        TourText, null=True, blank=True, on_delete=models.SET_NULL, related_name="common_for"
+    )
+    target_description = models.ForeignKey(
+        TourText, null=True, blank=True, on_delete=models.SET_NULL, related_name="target_for"
+    )
+    answer_description = models.ForeignKey(
+        TourText, null=True, blank=True, on_delete=models.SET_NULL, related_name="answer_for"
+    )
+
     trip_dates = models.TextField(blank=True)
 
     nights = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)

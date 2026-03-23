@@ -1,5 +1,14 @@
 # Tour Aggregator (Django)
 
+## Production: init.sql for PostgreSQL
+
+Для продакшн-запуска подключён явный `docker/db/init.sql` (создаёт расширения `pg_trgm`, `unaccent`, `citext`).
+
+Важно: init-скрипты Postgres выполняются **только** при первом запуске на пустом volume.
+
+- Запуск: `docker compose -p touragg -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
+- Переинициализировать БД (удалит данные): `docker compose -p touragg down -v`
+
 ## Быстрый старт (PostgreSQL)
 
 ### Вариант A: запуск в Docker (backend + PostgreSQL)

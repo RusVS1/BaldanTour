@@ -5,12 +5,42 @@ from datetime import date
 from urllib.parse import urlparse
 
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Favorite, Tour
+
+
+COUNTRY_SLUG_TO_RU = {
+    "abkhazia": "Абхазия",
+    "armenia": "Армения",
+    "belarus": "Беларусь",
+    "china": "Китай",
+    "georgia": "Грузия",
+    "maldives": "Мальдивы",
+    "russia": "Россия",
+    "spain": "Испания",
+}
+
+TOWNFROM_SLUG_TO_RU = {
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "kaliningrad": "Калининград",
+    "spb": "Санкт-Петербург",
+    "sankt-peterburg": "Санкт-Петербург",
+}
+
+
+def _to_ru_label(value: str, mapping: dict[str, str]) -> str:
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if any("А" <= ch <= "я" or ch in ("Ё", "ё") for ch in v):
+        return v
+    return mapping.get(v, v)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -35,7 +65,12 @@ def _hotel_name_from_base_link(base_link: str | None) -> str:
 
 
 def _description_for_tour(tour: Tour) -> str:
-    return (tour.description or "").strip() or (tour.raw_text or "").strip()
+    # Backward-compatible single "description" (if needed somewhere)
+    return (tour.raw_text or "").strip()
+
+
+def _text_content(text: object | None) -> str:
+    return (getattr(text, "content", "") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -59,10 +94,18 @@ class TourSearchParams:
 
 class TourSearchResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
+    hotel_slug = serializers.CharField()
     hotel_name = serializers.CharField()
+    hotel_rating = serializers.CharField(allow_blank=True)
+    hotel_stars = serializers.IntegerField(allow_null=True)
+    hotel_type = serializers.CharField(allow_blank=True, allow_null=True)
+    meal = serializers.CharField(allow_blank=True, allow_null=True)
+    main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
     price_per_person = serializers.IntegerField(allow_null=True)
     buy_link = serializers.CharField(allow_blank=True, allow_null=True)
-    description = serializers.CharField(allow_blank=True)
+    common_description = serializers.CharField(allow_blank=True)
+    target_description = serializers.CharField(allow_blank=True)
+    answer_description = serializers.CharField(allow_blank=True)
     meta = serializers.DictField()
 
 
@@ -218,7 +261,10 @@ class TourSearchAPI(APIView):
         )
 
         qs = Tour.objects.all()
-        qs = qs.filter(townfrom__iexact=townfrom, country_slug__iexact=country_slug)
+        qs = qs.filter(
+            (Q(townfrom__iexact=townfrom) | Q(townfrom_ru__iexact=townfrom))
+            & (Q(country_slug__iexact=country_slug) | Q(country_ru__iexact=country_slug))
+        )
         qs = qs.filter(adult=adult, child=child)
         qs = qs.filter(nights__gte=nights_min, nights__lte=nights_max)
         qs = qs.filter(checkin_beg__lte=departure_to, checkin_end__gte=departure_from)
@@ -233,14 +279,15 @@ class TourSearchAPI(APIView):
             qs = qs.filter(meal__iexact=meal)
 
         qs = qs.order_by(*self.SORT_MAP[sort])
+        qs = qs.select_related("common_description", "target_description", "answer_description", "main_image")
 
         total = qs.count()
         offset = (page - 1) * page_size
         tours = list(qs[offset : offset + page_size])
 
         requested_meta = {
-            "townfrom": townfrom,
-            "country_slug": country_slug,
+            "townfrom": _to_ru_label(townfrom, TOWNFROM_SLUG_TO_RU),
+            "country_slug": _to_ru_label(country_slug, COUNTRY_SLUG_TO_RU),
             "departure_from": departure_from.isoformat(),
             "departure_to": departure_to.isoformat(),
             "nights_min": nights_min,
@@ -273,10 +320,18 @@ class TourSearchAPI(APIView):
             results.append(
                 {
                     "id": tour.id,
-                    "hotel_name": _hotel_name_from_base_link(tour.base_link),
+                    "hotel_slug": _hotel_name_from_base_link(tour.base_link),
+                    "hotel_name": tour.hotel_name or _hotel_name_from_base_link(tour.base_link),
+                    "hotel_rating": tour.hotel_rating or "",
+                    "hotel_stars": tour.hotel_stars,
+                    "hotel_type": tour.hotel_type or None,
+                    "meal": tour.meal or None,
+                    "main_image_url": tour.main_image.url if tour.main_image else None,
                     "price_per_person": price_per_person,
                     "buy_link": tour.booking_link,
-                    "description": _description_for_tour(tour),
+                    "common_description": _text_content(tour.common_description),
+                    "target_description": _text_content(tour.target_description),
+                    "answer_description": _text_content(tour.answer_description),
                     "meta": resolved_meta,
                 }
             )
@@ -346,9 +401,9 @@ class FilterTownFromAPI(APIView):
     @extend_schema(responses=ValuesStringEnvelopeSerializer)
     def get(self, request):
         values = (
-            Tour.objects.exclude(townfrom="")
-            .order_by("townfrom")
-            .values_list("townfrom", flat=True)
+            Tour.objects.exclude(townfrom_ru="")
+            .order_by("townfrom_ru")
+            .values_list("townfrom_ru", flat=True)
             .distinct()
         )
         return Response({"values": list(values)})
@@ -361,9 +416,9 @@ class FilterCountryAPI(APIView):
     @extend_schema(responses=ValuesStringEnvelopeSerializer)
     def get(self, request):
         values = (
-            Tour.objects.exclude(country_slug="")
-            .order_by("country_slug")
-            .values_list("country_slug", flat=True)
+            Tour.objects.exclude(country_ru="")
+            .order_by("country_ru")
+            .values_list("country_ru", flat=True)
             .distinct()
         )
         return Response({"values": list(values)})
@@ -422,18 +477,31 @@ class FavoriteToursAPI(APIView):
         results = [
             {
                 "id": t.id,
-                "hotel_name": _hotel_name_from_base_link(t.base_link),
+                "hotel_slug": _hotel_name_from_base_link(t.base_link),
+                "hotel_name": t.hotel_name or _hotel_name_from_base_link(t.base_link),
+                "hotel_rating": t.hotel_rating or "",
+                "hotel_stars": t.hotel_stars,
+                "hotel_type": t.hotel_type or None,
+                "meal": t.meal or None,
+                "main_image_url": t.main_image.url if t.main_image else None,
                 "price_per_person": int(t.price_value // max(t.adult, 1)) if t.price_value is not None else None,
                 "buy_link": t.booking_link,
-                "description": _description_for_tour(t),
+                "common_description": _text_content(t.common_description),
+                "target_description": _text_content(t.target_description),
+                "answer_description": _text_content(t.answer_description),
                 "meta": {
+                    "townfrom": (t.townfrom_ru or "").strip() or _to_ru_label(t.townfrom or "", TOWNFROM_SLUG_TO_RU),
+                    "country_slug": (t.country_ru or "").strip()
+                    or _to_ru_label(t.country_slug or "", COUNTRY_SLUG_TO_RU),
                     "rest_type": t.rest_type or None,
                     "hotel_type": t.hotel_type or None,
                     "hotel_category": t.hotel_category,
                     "meal": t.meal or None,
                 },
             }
-            for t in tours
+            for t in tours.select_related(
+                "common_description", "target_description", "answer_description", "main_image"
+            )
         ]
         return Response({"meta": {"user_id": user_id, "count": len(results)}, "results": results})
 
