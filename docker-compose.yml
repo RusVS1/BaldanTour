@@ -77,7 +77,8 @@ services:
     environment:
       - TZ=Europe/Moscow
     labels:
-      ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
+      # ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
+      ofelia.job-run.parser.schedule: "0 36 * * * *"
       ofelia.job-run.parser.image: "parser-app:latest"
       ofelia.job-run.parser.command: >
         python /app/main.py
@@ -96,6 +97,11 @@ services:
         --shm-size=2gb
         --init
         --env TZ=Europe/Moscow
+        --cpus="2"
+        --memory="4g"
+        --memory-swap="4g"
+        --pids-limit=100
+        --oom-kill-disable
       ofelia.job-run.parser.notify.success: "true"
       ofelia.job-run.parser.notify.error: "true"
 
