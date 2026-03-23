@@ -51,5 +51,37 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+  parser-builder:
+    build:
+      context: ./parser
+      args:
+        POSTGRES_DB: ${POSTGRES_DB}
+        POSTGRES_USER: ${POSTGRES_USER}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        POSTGRES_HOST: db
+        POSTGRES_PORT: 5432
+    image: parser-app:latest
+    command: echo "Успешно собрано!"
+
+  scheduler:
+    image: mcuadros/ofelia:latest
+    env_file:
+      - .env
+    container_name: parser-app-scheduler
+    depends_on:
+      - db
+      - parser-builder
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      ofelia.job-run.parser.schedule: "0 26 * * * *"
+      ofelia.job-run.parser.image: "parser-app:latest"
+      ofelia.job-run.parser.command: "python /app/main.py --headless --reset-output --out-csv /tmp/output.csv --out-json /tmp/output.json --stop-flag /tmp/STOP.flag"
+      ofelia.job-run.parser.autoRemove: "true"
+      ofelia.job-run.parser.no-overlap: "true"
+      ofelia.job-run.parser.runtime-flags: "--shm-size=1gb --init"
+
 volumes:
   pgdata:

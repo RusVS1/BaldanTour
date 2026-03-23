@@ -243,7 +243,7 @@
       <div class="col">
         <q-input
           v-model="aiQuery"
-          label="Опишите ваш идеальный отдых*"
+          label="Опишите ваш идеальный отдых*(beta)"
           filled
           hide-bottom-space
           bg-color="white"
