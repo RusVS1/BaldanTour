@@ -21,9 +21,9 @@
       <q-space />
 
       <div class="row items-center q-gutter-sm q-mr-md" style="font-size: 24px">
-        <div>$ курс</div>
+        <div>$ {{ usdRate }}</div>
         <div>|</div>
-        <div>€ курс</div>
+        <div>€ {{ eurRate }}</div>
       </div>
 
       <q-btn v-if="!isAuth" flat no-caps label="Вход" to="/login" style="font-size: 24px" />
@@ -35,15 +35,13 @@
         <q-menu anchor="bottom right" self="top right" style="font-size: 24px" class="text-primary">
           <q-list style="min-width: 150px">
             <q-item>
-              <q-item-section>
-                {{ userLogin }}
-              </q-item-section>
+              <q-item-section>{{ auth.user?.username }}</q-item-section>
             </q-item>
 
             <q-separator />
 
-            <q-item clickable v-ripple @click="logout">
-              <q-item-section> Выход </q-item-section>
+            <q-item clickable v-ripple @click="handleLogout">
+              <q-item-section>Выход</q-item-section>
             </q-item>
           </q-list>
         </q-menu>
@@ -53,15 +51,47 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
+import { useAuthStore } from 'src/stores/auth';
+import { getFxRates, type FxResponse } from 'src/api/fx';
 
-const isAuth = ref(true);
+const auth = useAuthStore();
+const router = useRouter();
 
-const userLogin = ref('Логин_пользователя');
+const isAuth = computed(() => !!auth.user);
 
-function logout() {
-  console.log('Выход из аккаунта');
+const fx = ref<FxResponse | null>(null);
+const isFxLoading = ref(false);
+
+async function loadFx() {
+  try {
+    isFxLoading.value = true;
+    fx.value = await getFxRates();
+  } catch (e) {
+    console.error('Ошибка загрузки курса', e);
+  } finally {
+    isFxLoading.value = false;
+  }
+}
+
+onMounted(() => {
+  void loadFx();
+
+  setInterval(
+    () => {
+      void loadFx();
+    },
+    1000 * 60 * 10,
+  );
+});
+
+const usdRate = computed(() => (fx.value ? fx.value.usd_to_rub.toFixed(2) : '...'));
+
+const eurRate = computed(() => (fx.value ? fx.value.eur_to_rub.toFixed(2) : '...'));
+
+async function handleLogout() {
+  await auth.logout();
+  await router.push('/');
 }
 </script>
-
-<style scoped></style>
