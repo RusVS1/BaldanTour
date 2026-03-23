@@ -73,6 +73,26 @@ def _text_content(text: object | None) -> str:
     return (getattr(text, "content", "") or "").strip()
 
 
+MEAL_EXTENSION_MAP = {
+    "RO": "Без питания",
+    "BB": "Завтрак",
+    "HB": "Полупансион",
+    "FB": "Полный пансион",
+    "AI": "Все включено",
+    "UAI": "Все включено + импортные продукты",
+    "HB+": "Расширенный полупансион",
+    "FB+": "Расширенный полный пансион",
+}
+
+
+def _meal_extension(meal: str | None) -> str:
+    code = (meal or "").strip()
+    if not code:
+        return ""
+    code = code.upper()
+    return MEAL_EXTENSION_MAP.get(code, "")
+
+
 @dataclass(frozen=True)
 class TourSearchParams:
     townfrom: str
@@ -99,6 +119,7 @@ class TourSearchResponseSerializer(serializers.Serializer):
     hotel_rating = serializers.CharField(allow_blank=True)
     hotel_type = serializers.CharField(allow_blank=True, allow_null=True)
     meal = serializers.CharField(allow_blank=True, allow_null=True)
+    meal_extension = serializers.CharField(allow_blank=True)
     main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
     price_per_person = serializers.IntegerField(allow_null=True)
     buy_link = serializers.CharField(allow_blank=True, allow_null=True)
@@ -324,6 +345,7 @@ class TourSearchAPI(APIView):
                     "hotel_rating": tour.hotel_rating or "",
                     "hotel_type": tour.hotel_type or None,
                     "meal": tour.meal or None,
+                    "meal_extension": _meal_extension(tour.meal),
                     "main_image_url": tour.main_image.url if tour.main_image else None,
                     "price_per_person": price_per_person,
                     "buy_link": tour.booking_link,
@@ -480,6 +502,7 @@ class FavoriteToursAPI(APIView):
                 "hotel_rating": t.hotel_rating or "",
                 "hotel_type": t.hotel_type or None,
                 "meal": t.meal or None,
+                "meal_extension": _meal_extension(t.meal),
                 "main_image_url": t.main_image.url if t.main_image else None,
                 "price_per_person": int(t.price_value // max(t.adult, 1)) if t.price_value is not None else None,
                 "buy_link": t.booking_link,
