@@ -86,11 +86,28 @@ def _parse_hotel_type(*values: str | None) -> str:
     text = " ".join([v for v in values if v]).lower()
     if not text:
         return ""
-    if "для взрослых" in text or "adults only" in text or "adult only" in text:
-        return "для взрослых"
-    if "для детей" in text or "детск" in text:
-        return "для детей"
+    if (
+        "для взрослых" in text
+        or "взросл" in text
+        or "adults only" in text
+        or "adult only" in text
+    ):
+        return "Для взрослых"
+    if "для детей" in text or "детск" in text or "с детьми" in text or "дет" in text:
+        return "Для детей"
     return ""
+
+
+def _normalize_hotel_type(value: str | None) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    lower = value.lower()
+    if "взросл" in lower or "adults only" in lower or "adult only" in lower:
+        return "Для взрослых"
+    if "дет" in lower or "с детьми" in lower:
+        return "Для детей"
+    return value
 
 
 def _sha256_text(value: str) -> str:
@@ -260,7 +277,7 @@ class Command(BaseCommand):
                     text_by_hash[answer_hash] = answer_desc
 
                 hotel_category = _parse_hotel_category_from_csv(row.get("hotel_stars"))
-                direct_hotel_type = (row.get("hotel_type") or "").strip()
+                direct_hotel_type = _normalize_hotel_type(row.get("hotel_type"))
 
                 country_slug = (row.get("country_slug") or "").strip()
                 townfrom = (row.get("townfrom") or "").strip()
