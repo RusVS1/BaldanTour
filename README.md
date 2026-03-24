@@ -44,3 +44,8 @@ docker-compose up -d --build
 
 - Swagger-документация API:  
   http://localhost/api/docs
+
+# Документация
+
+- Макеты системы:  
+  https://www.figma.com/design/o70jjZMo0nLCzeifo7vcuU/Untitled?node-id=0-1&p=f&t=bZOGkEDxFpqIge9p-0
