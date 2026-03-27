@@ -10,6 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app:/app/backend \
     TZ=Europe/Moscow \
     POSTGRES_DB=${POSTGRES_DB} \
     POSTGRES_USER=${POSTGRES_USER} \
@@ -20,6 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY parser/requirements.txt /app/parser/requirements.txt
+COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /app/parser/requirements.txt
 

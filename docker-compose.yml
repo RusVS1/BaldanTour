@@ -57,14 +57,14 @@ services:
 
   parser-builder:
     build:
-      context: ./parser
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: parser/Dockerfile
       args:
         POSTGRES_DB: ${POSTGRES_DB}
         POSTGRES_USER: ${POSTGRES_USER}
         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-        POSTGRES_HOST: db
-        POSTGRES_PORT: 5432
+        POSTGRES_HOST: host.docker.internal
+        POSTGRES_PORT: 5433
     image: parser-app:latest
     command: echo "Образ parser-app:latest собран"
     profiles:
@@ -74,13 +74,13 @@ services:
     image: mcuadros/ofelia:latest
     container_name: parser-scheduler
     restart: unless-stopped
-    command: daemon --docker
+    command: sh -lc "sleep 600 && exec /usr/bin/ofelia daemon --docker"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - TZ=Europe/Moscow
     labels:
-      ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
+      ofelia.job-run.parser.schedule: "0 0 22 * * 0"
       ofelia.job-run.parser.image: "parser-app:latest"
       ofelia.job-run.parser.command: >
         python /app/main.py
@@ -90,15 +90,18 @@ services:
         --out-csv /app/output/result.csv
         --out-json /app/output/result.json
         --stop-flag /app/output/STOP.flag
-        --max-hotels 5
-        --max-towns 3
-        --max-countries 2
+        --max-hotels 0
+        --max-towns 0
+        --max-countries 0
+        --country-workers 1
       ofelia.job-run.parser.autoRemove: "true"
       ofelia.job-run.parser.no-overlap: "true"
       ofelia.job-run.parser.runtime-flags: >
         --shm-size=2gb
         --init
         --env TZ=Europe/Moscow
+        --env POSTGRES_HOST=host.docker.internal
+        --env POSTGRES_PORT=5433
         --cpus="2"
         --memory="4g"
         --memory-swap="4g"

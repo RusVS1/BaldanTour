@@ -622,7 +622,6 @@ def build_db_emitter(batch_size: int):
                                 %(price_text)s, %(price_value)s, %(embedding)s, %(booking_link)s, %(raw_text)s,
                                 NOW(), NOW()
                             )
-                            ON CONFLICT ON CONSTRAINT uniq_tour_booking_link DO NOTHING
                             """,
                             insert_rows,
                         )
@@ -1461,7 +1460,15 @@ async def run_core(
     async with async_playwright() as p:
         if args.debug_stages:
             print("[debug] run_core: launching browser", flush=True)
-        browser = await p.chromium.launch(headless=args.headless)
+        browser = await p.chromium.launch(
+            headless=args.headless,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
         if args.debug_stages:
             print("[debug] run_core: browser launched", flush=True)
         semaphore = asyncio.Semaphore(max(1, args.country_workers))
@@ -1720,7 +1727,10 @@ async def process_country(
                     break
         finally:
             debug_log("closing worker context")
-            await context.close()
+            try:
+                await context.close()
+            except Exception:
+                debug_log("context already closed")
 
         return stop_requested
 

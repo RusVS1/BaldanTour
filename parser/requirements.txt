@@ -1,2 +1,2 @@
--r ../../requirements.txt
+-r ../backend/requirements.txt
 playwright>=1.52,<2.0
