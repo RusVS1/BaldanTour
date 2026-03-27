@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import calendar
 import csv
 import json
 import os
@@ -21,6 +22,19 @@ from playwright.async_api import async_playwright
 
 
 NIGHT_RANGES = [(1, 8), (9, 16), (17, 24), (25, 28)]
+
+
+def _default_checkin_window() -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=4)
+    month_index = start_date.month - 1 + 7
+    year = start_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(start_date.day, calendar.monthrange(year, month)[1])
+    end_date = date(year, month, day)
+    return start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
+
+
+DEFAULT_CHECKIN_BEG, DEFAULT_MAX_CHECKIN_BEG = _default_checkin_window()
 
 # Defaults embedded in code (so container runs do not depend on external CSV/text files).
 DEFAULT_TOWNS = [
@@ -150,8 +164,8 @@ DEFAULT_PARAMS = {
     "FIELD_WITHOUT_FLIGHT": "0",
     "NIGHTMAX": "2",
     "NIGHTMIN": "2",
-    "CHECKIN_BEG": "20260313",
-    "CHECKIN_END": "20260320",
+    "CHECKIN_BEG": DEFAULT_CHECKIN_BEG,
+    "CHECKIN_END": DEFAULT_MAX_CHECKIN_BEG,
 }
 
 
@@ -1250,8 +1264,8 @@ def build_args() -> argparse.Namespace:
     p.add_argument("--root", default=r"D:\asoiu")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--timeout-ms", type=int, default=30000)
-    p.add_argument("--start-checkin-beg", default="20260313")
-    p.add_argument("--max-checkin-beg", default="20260320")
+    p.add_argument("--start-checkin-beg", default=DEFAULT_CHECKIN_BEG)
+    p.add_argument("--max-checkin-beg", default=DEFAULT_MAX_CHECKIN_BEG)
     p.add_argument("--max-date-probe-days", type=int, default=40)
     p.add_argument("--max-hotels", type=int, default=1, help="Limit hotels per country (0 = all)")
     p.add_argument("--max-towns", type=int, default=3, help="Limit towns (0 = all)")
