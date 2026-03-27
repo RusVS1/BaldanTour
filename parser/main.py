@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import calendar
 import csv
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from asgiref.sync import sync_to_async
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+import psycopg
+from pgvector.psycopg import register_vector
 
 
 NIGHT_RANGES = [(1, 8), (9, 16), (17, 24), (25, 28)]
@@ -199,25 +202,120 @@ class ParsedTour:
     raw_text: str
 
 
-def setup_django() -> None:
-    project_root = Path(__file__).resolve().parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
-    import django
+COUNTRY_SLUG_TO_RU: dict[str, str] = {
+    "abkhazia": "Абхазия",
+    "andorra": "Андорра",
+    "argentina": "Аргентина",
+    "armenia": "Армения",
+    "aruba": "Аруба",
+    "austria": "Австрия",
+    "azerbaijan": "Азербайджан",
+    "bahrain": "Бахрейн",
+    "belarus": "Беларусь",
+    "belgium": "Бельгия",
+    "brazil": "Бразилия",
+    "bulgaria": "Болгария",
+    "cambodia": "Камбоджа",
+    "cape-verde": "Кабо-Верде",
+    "chile": "Чили",
+    "china": "Китай",
+    "china-hong-kong-sar": "Гонконг",
+    "china-macau-sar": "Макао",
+    "costa-rica": "Коста-Рика",
+    "croatia": "Хорватия",
+    "cuba": "Куба",
+    "cyprus": "Кипр",
+    "czech-republic": "Чехия",
+    "dominican-republic": "Доминикана",
+    "egypt": "Египет",
+    "fiji": "Фиджи",
+    "france": "Франция",
+    "georgia": "Грузия",
+    "germany": "Германия",
+    "greece": "Греция",
+    "hungary": "Венгрия",
+    "india": "Индия",
+    "indonesia": "Индонезия",
+    "israel": "Израиль",
+    "italy": "Италия",
+    "jamaica": "Ямайка",
+    "japan": "Япония",
+    "jordan": "Иордания",
+    "kazakhstan": "Казахстан",
+    "kenya": "Кения",
+    "kyrgyzstan": "Кыргызстан",
+    "lebanon": "Ливан",
+    "madagascar": "Мадагаскар",
+    "malaysia": "Малайзия",
+    "maldives": "Мальдивы",
+    "malta": "Мальта",
+    "mauritius": "Мавритания",
+    "mexico": "Мексика",
+    "mongolia": "Монголия",
+    "montenegro": "Черногория",
+    "morocco": "Марокко",
+    "namibia": "Намибия",
+    "nepal": "Непал",
+    "netherlands": "Нидерланды",
+    "oman": "Оман",
+    "panama": "Панама",
+    "peru": "Перу",
+    "philippines": "Филиппины",
+    "portugal": "Португалия",
+    "qatar": "Катар",
+    "russia": "Россия",
+    "saudi-arabia": "Саудовская Аравия",
+    "serbia": "Сербия",
+    "seychelles": "Сейшелы",
+    "singapore": "Сингапур",
+    "slovenia": "Словения",
+    "south-korea": "Южная Корея",
+    "spain": "Испания",
+    "sri-lanka": "Шри-Ланка",
+    "switzerland": "Швейцария",
+    "tanzania": "Танзания",
+    "thailand": "Таиланд",
+    "tunisia": "Тунис",
+    "turkey": "Турция",
+    "turkmenistan": "Туркменистан",
+    "uae": "ОАЭ",
+    "uruguay": "Уругвай",
+    "uzbekistan": "Узбекистан",
+    "vietnam": "Вьетнам",
+}
 
-    django.setup()
+TOWNFROM_SLUG_TO_RU: dict[str, str] = {
+    "barnaul": "Барнаул",
+    "chelyabinsk": "Челябинск",
+    "ekaterinburg": "Екатеринбург",
+    "kaliningrad": "Калининград",
+    "kazan": "Казань",
+    "krasnodar": "Краснодар",
+    "n-novgorod": "Нижний Новгород",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "perm": "Пермь",
+    "rostov-na-donu": "Ростов-на-Дону",
+    "samara": "Самара",
+    "sankt-peterburg": "Санкт-Петербург",
+    "tyumen": "Тюмень",
+    "vladivostok": "Владивосток",
+    "volgograd": "Волгоград",
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "spb": "Санкт-Петербург",
+}
+
+
+def _slugify_ascii(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9а-яё]+", "-", value)
+    value = value.strip("-")
+    return value[:64]
 
 
 def build_db_emitter(batch_size: int):
-    setup_django()
-    from django.db import transaction
-    from django.db.models import Case, IntegerField, Value, When
-    from django.utils.text import slugify
-
     from tours.embeddings import get_embedder
-    from tours.importers import COUNTRY_SLUG_TO_RU, TOWNFROM_SLUG_TO_RU
-    from tours.models import Amenity, Favorite, Tour, TourImage, TourText
 
     def parse_int_db(value: str | int | None) -> int | None:
         if value is None:
@@ -259,7 +357,7 @@ def build_db_emitter(batch_size: int):
         seen: set[str] = set()
         result: list[str] = []
         for part in parts:
-            slug = slugify(part)[:64] or slugify(part, allow_unicode=True)[:64]
+            slug = _slugify_ascii(part)
             if not slug or slug in seen:
                 continue
             seen.add(slug)
@@ -323,13 +421,28 @@ def build_db_emitter(batch_size: int):
         def __init__(self, *, batch_size: int):
             self.batch_size = batch_size
             self.total_flushed = 0
-            self.to_create: list[Tour] = []
+            self.to_create: list[dict[str, Any]] = []
             self.pending_amenities: list[list[str]] = []
             self.pending_text_hashes: list[tuple[str | None, str | None, str | None]] = []
             self.text_by_hash: dict[str, str] = {}
             self.pending_image_hashes: list[str | None] = []
             self.image_by_hash: dict[str, str] = {}
             self.pending_embed_texts: list[str] = []
+            self._conn: psycopg.Connection | None = None
+            self.embedder = get_embedder()
+
+        def _get_conn(self) -> psycopg.Connection:
+            if self._conn is None or self._conn.closed:
+                self._conn = psycopg.connect(
+                    host=os.environ.get("POSTGRES_HOST", "127.0.0.1"),
+                    port=int(os.environ.get("POSTGRES_PORT", "5432")),
+                    dbname=os.environ.get("POSTGRES_DB", "tour_aggregator"),
+                    user=os.environ.get("POSTGRES_USER", "tour_aggregator"),
+                    password=os.environ.get("POSTGRES_PASSWORD", "tour_aggregator"),
+                    connect_timeout=10,
+                )
+                register_vector(self._conn)
+            return self._conn
 
         def add_row(self, row: dict[str, Any]) -> None:
             price_value, price_text = parse_price_db(row.get("price"))
@@ -371,34 +484,34 @@ def build_db_emitter(batch_size: int):
                 ]
             ).strip()
 
-            tour = Tour(
-                country_slug=country_slug,
-                country_ru=to_ru_label_db(country_slug, COUNTRY_SLUG_TO_RU),
-                base_link=str(row.get("base_link") or "").strip() or None,
-                request_url=str(row.get("request_url") or "").strip(),
-                townfrom=townfrom,
-                townfrom_ru=to_ru_label_db(townfrom, TOWNFROM_SLUG_TO_RU),
-                adult=parse_int_db(row.get("adult")) or 0,
-                child=parse_int_db(row.get("child")) or 0,
-                night_min=parse_int_db(row.get("night_min")),
-                night_max=parse_int_db(row.get("night_max")),
-                checkin_beg=parse_date_yyyymmdd_db(str(row.get("checkin_beg") or "")),
-                checkin_end=parse_date_yyyymmdd_db(str(row.get("checkin_end") or "")),
-                hotel_name=str(row.get("hotel_name") or "").strip(),
-                hotel_rating=str(row.get("hotel_rating") or "").strip(),
-                trip_dates=str(row.get("trip_dates") or "").strip(),
-                nights=parse_int_db(row.get("nights")),
-                room=str(row.get("room") or "").strip(),
-                meal=str(row.get("meal") or "").strip(),
-                placement=str(row.get("placement") or "").strip(),
-                rest_type=parse_rest_type_db(common_desc, target_desc, str(row.get("raw_text") or "")),
-                hotel_type=direct_hotel_type or parse_hotel_type_db(target_desc, common_desc, str(row.get("raw_text") or "")),
-                hotel_category=hotel_category,
-                price_text=price_text,
-                price_value=price_value,
-                booking_link=str(row.get("booking_link") or "").strip() or None,
-                raw_text=str(row.get("raw_text") or "").strip(),
-            )
+            tour = {
+                "country_slug": country_slug,
+                "country_ru": to_ru_label_db(country_slug, COUNTRY_SLUG_TO_RU),
+                "base_link": str(row.get("base_link") or "").strip() or None,
+                "request_url": str(row.get("request_url") or "").strip(),
+                "townfrom": townfrom,
+                "townfrom_ru": to_ru_label_db(townfrom, TOWNFROM_SLUG_TO_RU),
+                "adult": parse_int_db(row.get("adult")) or 0,
+                "child": parse_int_db(row.get("child")) or 0,
+                "night_min": parse_int_db(row.get("night_min")),
+                "night_max": parse_int_db(row.get("night_max")),
+                "checkin_beg": parse_date_yyyymmdd_db(str(row.get("checkin_beg") or "")),
+                "checkin_end": parse_date_yyyymmdd_db(str(row.get("checkin_end") or "")),
+                "hotel_name": str(row.get("hotel_name") or "").strip(),
+                "hotel_rating": str(row.get("hotel_rating") or "").strip(),
+                "trip_dates": str(row.get("trip_dates") or "").strip(),
+                "nights": parse_int_db(row.get("nights")),
+                "room": str(row.get("room") or "").strip(),
+                "meal": str(row.get("meal") or "").strip(),
+                "placement": str(row.get("placement") or "").strip(),
+                "rest_type": parse_rest_type_db(common_desc, target_desc, str(row.get("raw_text") or "")),
+                "hotel_type": direct_hotel_type or parse_hotel_type_db(target_desc, common_desc, str(row.get("raw_text") or "")),
+                "hotel_category": hotel_category,
+                "price_text": price_text,
+                "price_value": price_value,
+                "booking_link": str(row.get("booking_link") or "").strip() or None,
+                "raw_text": str(row.get("raw_text") or "").strip(),
+            }
 
             self.to_create.append(tour)
             self.pending_amenities.append(split_amenities_db(str(row.get("functions") or "")))
@@ -414,99 +527,127 @@ def build_db_emitter(batch_size: int):
             if not tours:
                 return 0
 
-            request_urls = [tour.request_url for tour in tours if tour.request_url]
-            if not request_urls:
+            booking_links = [tour["booking_link"] for tour in tours if tour["booking_link"]]
+            if not booking_links and not any(tour["request_url"] for tour in tours):
                 self._reset_batch()
                 return 0
 
-            amenity_slugs: set[str] = set()
-            for slugs in self.pending_amenities:
-                amenity_slugs.update(slugs)
-
-            if amenity_slugs:
-                existing = set(Amenity.objects.filter(slug__in=amenity_slugs).values_list("slug", flat=True))
-                missing = amenity_slugs - existing
-                if missing:
-                    Amenity.objects.bulk_create(
-                        [Amenity(slug=slug, name=slug.replace("-", " ")) for slug in sorted(missing)],
-                        ignore_conflicts=True,
-                    )
-                slug_to_id = dict(Amenity.objects.filter(slug__in=amenity_slugs).values_list("slug", "id"))
-            else:
-                slug_to_id = {}
-
-            text_hashes = {hash_value for pair in self.pending_text_hashes for hash_value in pair if hash_value}
-            if text_hashes:
-                existing_text = dict(TourText.objects.filter(sha256__in=list(text_hashes)).values_list("sha256", "id"))
-                missing_text = text_hashes - set(existing_text.keys())
-                if missing_text:
-                    TourText.objects.bulk_create(
-                        [TourText(sha256=hash_value, content=self.text_by_hash.get(hash_value, "")) for hash_value in sorted(missing_text)],
-                        ignore_conflicts=True,
-                    )
-                    existing_text = dict(TourText.objects.filter(sha256__in=list(text_hashes)).values_list("sha256", "id"))
-
-                for tour, (common_hash, target_hash, answer_hash) in zip(tours, self.pending_text_hashes, strict=False):
-                    tour.common_description_id = existing_text.get(common_hash) if common_hash else None
-                    tour.target_description_id = existing_text.get(target_hash) if target_hash else None
-                    tour.answer_description_id = existing_text.get(answer_hash) if answer_hash else None
-
-            image_hashes = {hash_value for hash_value in self.pending_image_hashes if hash_value}
-            if image_hashes:
-                existing_images = dict(TourImage.objects.filter(sha256__in=list(image_hashes)).values_list("sha256", "id"))
-                missing_images = image_hashes - set(existing_images.keys())
-                if missing_images:
-                    TourImage.objects.bulk_create(
-                        [TourImage(sha256=hash_value, url=self.image_by_hash.get(hash_value, "")) for hash_value in sorted(missing_images)],
-                        ignore_conflicts=True,
-                    )
-                    existing_images = dict(TourImage.objects.filter(sha256__in=list(image_hashes)).values_list("sha256", "id"))
-
-                for tour, image_hash in zip(tours, self.pending_image_hashes, strict=False):
-                    tour.main_image_id = existing_images.get(image_hash) if image_hash else None
-
             if self.pending_embed_texts:
-                embedder = get_embedder()
                 try:
-                    vectors = embedder.embed_texts(self.pending_embed_texts)
+                    vectors = self.embedder.embed_texts(self.pending_embed_texts)
                     for tour, vector in zip(tours, vectors, strict=False):
-                        tour.embedding = vector
+                        tour["embedding"] = vector
                 except Exception as exc:
                     print(f"[db] WARNING: embeddings skipped for batch: {exc}", flush=True)
 
-            with transaction.atomic():
-                Tour.objects.bulk_create(tours, ignore_conflicts=True)
+            conn = self._get_conn()
+            with conn.transaction():
+                amenity_slugs = sorted({slug for slugs in self.pending_amenities for slug in slugs})
+                slug_to_id: dict[str, int] = {}
+                with conn.cursor() as cur:
+                    if amenity_slugs:
+                        cur.executemany(
+                            "INSERT INTO tours_amenity (slug, name) VALUES (%s, %s) ON CONFLICT (slug) DO NOTHING",
+                            [(slug, slug.replace("-", " ")) for slug in amenity_slugs],
+                        )
+                        cur.execute(
+                            "SELECT id, slug FROM tours_amenity WHERE slug = ANY(%s)",
+                            (amenity_slugs,),
+                        )
+                        slug_to_id = {slug: id_ for (id_, slug) in cur.fetchall()}
 
-                created = {
-                    tour.request_url: tour.id
-                    for tour in Tour.objects.filter(request_url__in=request_urls).only("id", "request_url")
-                }
+                    text_hashes = sorted({hash_value for pair in self.pending_text_hashes for hash_value in pair if hash_value})
+                    text_id_by_hash: dict[str, int] = {}
+                    if text_hashes:
+                        cur.executemany(
+                            "INSERT INTO tours_tourtext (sha256, content) VALUES (%s, %s) ON CONFLICT (sha256) DO NOTHING",
+                            [(hash_value, self.text_by_hash.get(hash_value, "")) for hash_value in text_hashes],
+                        )
+                        cur.execute(
+                            "SELECT id, sha256 FROM tours_tourtext WHERE sha256 = ANY(%s)",
+                            (text_hashes,),
+                        )
+                        text_id_by_hash = {sha256: id_ for (id_, sha256) in cur.fetchall()}
 
-                url_to_category = {
-                    tour.request_url: tour.hotel_category
-                    for tour in tours
-                    if tour.request_url and tour.hotel_category is not None
-                }
-                if url_to_category:
-                    whens = [When(request_url=url, then=Value(category)) for url, category in url_to_category.items()]
-                    Tour.objects.filter(
-                        request_url__in=list(url_to_category.keys()),
-                        hotel_category__isnull=True,
-                    ).update(hotel_category=Case(*whens, output_field=IntegerField()))
+                    image_hashes = sorted({hash_value for hash_value in self.pending_image_hashes if hash_value})
+                    image_id_by_hash: dict[str, int] = {}
+                    if image_hashes:
+                        cur.executemany(
+                            "INSERT INTO tours_tourimage (sha256, url) VALUES (%s, %s) ON CONFLICT (sha256) DO NOTHING",
+                            [(hash_value, self.image_by_hash.get(hash_value, "")) for hash_value in image_hashes],
+                        )
+                        cur.execute(
+                            "SELECT id, sha256 FROM tours_tourimage WHERE sha256 = ANY(%s)",
+                            (image_hashes,),
+                        )
+                        image_id_by_hash = {sha256: id_ for (id_, sha256) in cur.fetchall()}
 
-                through = Tour.amenities.through
-                relations = []
-                for tour, slugs in zip(tours, self.pending_amenities, strict=False):
-                    tour_id = created.get(tour.request_url)
-                    if not tour_id:
-                        continue
-                    for slug in slugs:
-                        amenity_id = slug_to_id.get(slug)
-                        if amenity_id:
-                            relations.append(through(tour_id=tour_id, amenity_id=amenity_id))
+                    for tour, (common_hash, target_hash, answer_hash), image_hash in zip(
+                        tours, self.pending_text_hashes, self.pending_image_hashes, strict=False
+                    ):
+                        tour["common_description_id"] = text_id_by_hash.get(common_hash) if common_hash else None
+                        tour["target_description_id"] = text_id_by_hash.get(target_hash) if target_hash else None
+                        tour["answer_description_id"] = text_id_by_hash.get(answer_hash) if answer_hash else None
+                        tour["main_image_id"] = image_id_by_hash.get(image_hash) if image_hash else None
 
-                if relations:
-                    through.objects.bulk_create(relations, ignore_conflicts=True)
+                    existing_by_booking: dict[str, int] = {}
+                    if booking_links:
+                        cur.execute(
+                            "SELECT id, booking_link FROM tours_tour WHERE booking_link = ANY(%s)",
+                            (booking_links,),
+                        )
+                        existing_by_booking = {booking_link: id_ for (id_, booking_link) in cur.fetchall() if booking_link}
+
+                    insert_rows = [tour for tour in tours if not tour["booking_link"] or tour["booking_link"] not in existing_by_booking]
+                    created_by_booking = dict(existing_by_booking)
+                    if insert_rows:
+                        cur.executemany(
+                            """
+                            INSERT INTO tours_tour (
+                                country_slug, country_ru, base_link, request_url, townfrom, townfrom_ru,
+                                adult, child, night_min, night_max, checkin_beg, checkin_end,
+                                hotel_name, hotel_rating, main_image_id,
+                                common_description_id, target_description_id, answer_description_id,
+                                trip_dates, nights, room, meal, placement,
+                                rest_type, hotel_type, hotel_category,
+                                price_text, price_value, embedding, booking_link, raw_text,
+                                created_at, updated_at
+                            ) VALUES (
+                                %(country_slug)s, %(country_ru)s, %(base_link)s, %(request_url)s, %(townfrom)s, %(townfrom_ru)s,
+                                %(adult)s, %(child)s, %(night_min)s, %(night_max)s, %(checkin_beg)s, %(checkin_end)s,
+                                %(hotel_name)s, %(hotel_rating)s, %(main_image_id)s,
+                                %(common_description_id)s, %(target_description_id)s, %(answer_description_id)s,
+                                %(trip_dates)s, %(nights)s, %(room)s, %(meal)s, %(placement)s,
+                                %(rest_type)s, %(hotel_type)s, %(hotel_category)s,
+                                %(price_text)s, %(price_value)s, %(embedding)s, %(booking_link)s, %(raw_text)s,
+                                NOW(), NOW()
+                            )
+                            ON CONFLICT ON CONSTRAINT uniq_tour_booking_link DO NOTHING
+                            """,
+                            insert_rows,
+                        )
+                        created_links = [tour["booking_link"] for tour in insert_rows if tour["booking_link"]]
+                        if created_links:
+                            cur.execute(
+                                "SELECT id, booking_link FROM tours_tour WHERE booking_link = ANY(%s)",
+                                (created_links,),
+                            )
+                            created_by_booking = {booking_link: id_ for (id_, booking_link) in cur.fetchall() if booking_link}
+
+                    relations = []
+                    for tour, slugs in zip(tours, self.pending_amenities, strict=False):
+                        tour_id = created_by_booking.get(tour["booking_link"]) if tour["booking_link"] else None
+                        if not tour_id:
+                            continue
+                        for slug in slugs:
+                            amenity_id = slug_to_id.get(slug)
+                            if amenity_id:
+                                relations.append((tour_id, amenity_id))
+                    if relations:
+                        cur.executemany(
+                            "INSERT INTO tours_tour_amenities (tour_id, amenity_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                            relations,
+                        )
 
             flushed = len(tours)
             self.total_flushed += flushed
@@ -518,13 +659,15 @@ def build_db_emitter(batch_size: int):
             return self.total_flushed
 
         def truncate_all(self) -> None:
-            with transaction.atomic():
-                Favorite.objects.all().delete()
-                Tour.amenities.through.objects.all().delete()
-                Amenity.objects.all().delete()
-                Tour.objects.all().delete()
-                TourText.objects.all().delete()
-                TourImage.objects.all().delete()
+            conn = self._get_conn()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM tours_favorite")
+                    cur.execute("DELETE FROM tours_tour_amenities")
+                    cur.execute("DELETE FROM tours_amenity")
+                    cur.execute("DELETE FROM tours_tour")
+                    cur.execute("DELETE FROM tours_tourtext")
+                    cur.execute("DELETE FROM tours_tourimage")
 
         def _reset_batch(self) -> None:
             self.to_create = []
@@ -1209,7 +1352,7 @@ async def run(args: argparse.Namespace) -> None:
     city_names: set[str] = set(DEFAULT_TOWNS)
     links_by_country: dict[str, list[str]] = {}
     root = Path(args.root)
-    project_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parent.parent
 
     countries = select_countries(args.country_slug, args.country_slugs, args.max_countries)
     towns = select_towns(args.townfrom, args.max_towns)
