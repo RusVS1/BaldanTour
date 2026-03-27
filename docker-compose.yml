@@ -1,0 +1,111 @@
+services:
+  db:
+    build: ./db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./db/restore.sh:/docker-entrypoint-initdb.d/01-restore.sh:ro
+      - ./db/data.dump:/docker-entrypoint-initdb.d/data.dump:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      DB_WAIT_SECONDS: 60
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app 
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/fx/rub/"]
+      interval: 5s
+      timeout: 3s 
+      retries: 10 
+      start_period: 15s
+    restart: unless-stopped
+      
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  parser-builder:
+    build:
+      context: ./parser
+      dockerfile: Dockerfile
+      args:
+        POSTGRES_DB: ${POSTGRES_DB}
+        POSTGRES_USER: ${POSTGRES_USER}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        POSTGRES_HOST: db
+        POSTGRES_PORT: 5432
+    image: parser-app:latest
+    command: echo "Образ parser-app:latest собран"
+    profiles:
+      - build
+
+  scheduler:
+    image: mcuadros/ofelia:latest
+    container_name: parser-scheduler
+    restart: unless-stopped
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - TZ=Europe/Moscow
+    labels:
+      ofelia.job-run.parser.schedule: "0 0 22 */2 * *"
+      ofelia.job-run.parser.image: "parser-app:latest"
+      ofelia.job-run.parser.command: >
+        python /app/main.py
+        --headless
+        --reset-output
+        --root /app
+        --out-csv /app/output/result.csv
+        --out-json /app/output/result.json
+        --stop-flag /app/output/STOP.flag
+        --max-hotels 5
+        --max-towns 3
+        --max-countries 2
+      ofelia.job-run.parser.autoRemove: "true"
+      ofelia.job-run.parser.no-overlap: "true"
+      ofelia.job-run.parser.runtime-flags: >
+        --shm-size=2gb
+        --init
+        --env TZ=Europe/Moscow
+        --cpus="2"
+        --memory="4g"
+        --memory-swap="4g"
+        --pids-limit=100
+        --oom-kill-disable
+      ofelia.job-run.parser.notify.success: "true"
+      ofelia.job-run.parser.notify.error: "true"
+
+volumes:
+  pgdata:
