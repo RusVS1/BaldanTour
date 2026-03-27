@@ -74,7 +74,7 @@ class Tour(models.Model):
     price_text = models.CharField(max_length=64, blank=True)
     price_value = models.PositiveIntegerField(null=True, blank=True, db_index=True)
 
-    embedding = VectorField(dimensions=1536, null=True, blank=True)
+    embedding = VectorField(dimensions=768, null=True, blank=True)
 
     booking_link = models.URLField(max_length=2000, null=True, blank=True)
     raw_text = models.TextField(blank=True)

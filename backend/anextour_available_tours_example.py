@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from asgiref.sync import sync_to_async
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
@@ -181,6 +183,34 @@ class ParsedTour:
     price: str
     booking_link: str
     raw_text: str
+
+
+def setup_django() -> None:
+    project_root = Path(__file__).resolve().parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    import django
+
+    django.setup()
+
+
+def build_db_emitter(batch_size: int):
+    setup_django()
+    from tours.importers import TourRowImporter
+
+    importer = TourRowImporter(batch_size=batch_size, log=lambda msg: print(f"[db] {msg}"))
+
+    async def emit(row: dict[str, Any]) -> None:
+        await sync_to_async(importer.add_row, thread_sensitive=True)(row)
+
+    async def finalize() -> int:
+        return await sync_to_async(importer.finalize, thread_sensitive=True)()
+
+    async def truncate() -> None:
+        await sync_to_async(importer.truncate_all, thread_sensitive=True)()
+
+    return emit, finalize, truncate
 
 
 def normalize_space(value: str) -> str:
@@ -842,6 +872,8 @@ async def run(args: argparse.Namespace) -> None:
     rows: list[dict[str, str]] = []
     city_names: set[str] = set(DEFAULT_TOWNS)
     links_by_country: dict[str, list[str]] = {}
+    root = Path(args.root)
+    project_root = Path(__file__).resolve().parent
 
     countries = select_countries(args.country_slug, args.country_slugs, args.max_countries)
     towns = select_towns(args.townfrom, args.max_towns)
@@ -854,13 +886,23 @@ async def run(args: argparse.Namespace) -> None:
     json_out = Path(args.out_json)
     jsonl_out = Path(str(json_out) + ".jsonl")
 
-    stop_flag = Path(args.stop_flag) if args.stop_flag else (root / "STOP_PARSING.flag")
+    stop_flag = Path(args.stop_flag) if args.stop_flag else (project_root / "STOP_PARSING.flag")
+    if args.debug_stages:
+        print(f"[debug] stop_flag path: {stop_flag}", flush=True)
     flush_interval = max(10, args.flush_interval_sec)
+    db_emit = None
+    db_finalize = None
+    db_truncate = None
 
-    if args.reset_output:
+    if args.write_db:
+        db_emit, db_finalize, db_truncate = build_db_emitter(args.db_batch_size)
+
+    if args.reset_output and args.write_output:
         for p in (csv_out, json_out, jsonl_out):
             if p.exists():
                 p.unlink()
+    if args.reset_db and db_truncate is not None:
+        await db_truncate()
 
     fieldnames = list(ParsedTour.__annotations__.keys())
     buffer: list[dict[str, Any]] = []
@@ -870,6 +912,10 @@ async def run(args: argparse.Namespace) -> None:
 
     def flush(force: bool = False) -> None:
         nonlocal buffer, total_written, last_flush
+        if not args.write_output:
+            buffer = []
+            last_flush = time.monotonic()
+            return
         now = time.monotonic()
         if not buffer:
             return
@@ -883,7 +929,9 @@ async def run(args: argparse.Namespace) -> None:
         buffer = []
         last_flush = now
 
-    def emit_row(row: dict[str, Any]) -> None:
+    async def emit_row(row: dict[str, Any]) -> None:
+        if db_emit is not None:
+            await db_emit(row)
         buffer.append(row)
         flush(force=False)
 
@@ -899,13 +947,18 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     flush(force=True)
-    materialize_json_from_jsonl(jsonl_out, json_out)
+    if db_finalize is not None:
+        written_to_db = await db_finalize()
+        print(f"[done] db_rows_flushed: {written_to_db}")
+    if args.write_output:
+        materialize_json_from_jsonl(jsonl_out, json_out)
 
     status = "stopped_by_flag" if stop_requested else "completed"
     print(f"[done] status: {status}")
-    print(f"[done] json: {json_out}")
-    print(f"[done] csv:  {csv_out}")
-    print(f"[done] rows_written: {total_written}")
+    if args.write_output:
+        print(f"[done] json: {json_out}")
+        print(f"[done] csv:  {csv_out}")
+        print(f"[done] rows_written: {total_written}")
 
 async def run_core(
     args: argparse.Namespace,
@@ -924,9 +977,83 @@ async def run_core(
 
     This allows writing to other sinks (e.g. direct DB upserts) without CSV промежуточных файлов.
     """
-    stop_requested = False
+    if args.debug_stages:
+        print("[debug] run_core: entering async_playwright", flush=True)
     async with async_playwright() as p:
+        if args.debug_stages:
+            print("[debug] run_core: launching browser", flush=True)
         browser = await p.chromium.launch(headless=args.headless)
+        if args.debug_stages:
+            print("[debug] run_core: browser launched", flush=True)
+        semaphore = asyncio.Semaphore(max(1, args.country_workers))
+        tasks = [
+            asyncio.create_task(
+                process_country(
+                    browser=browser,
+                    semaphore=semaphore,
+                    args=args,
+                    rows=rows,
+                    city_names=city_names,
+                    links_by_country=links_by_country,
+                    towns=towns,
+                    stop_flag=stop_flag,
+                    country_slug=country_slug,
+                    emit_row=emit_row,
+                )
+            )
+            for country_slug in countries
+        ]
+        if args.debug_stages:
+            print(f"[debug] run_core: created {len(tasks)} country tasks", flush=True)
+
+        results = []
+        if tasks:
+            results = await asyncio.gather(*tasks)
+        if args.debug_stages:
+            print("[debug] run_core: tasks completed", flush=True)
+
+        await browser.close()
+        if args.debug_stages:
+            print("[debug] run_core: browser closed", flush=True)
+
+    return any(results) or stop_flag.exists()
+
+
+def _empty_base_details() -> dict[str, str]:
+    return {
+        "hotel_name": "",
+        "hotel_rating": "",
+        "hotel_stars": "",
+        "hotel_type": "",
+        "main_image_url": "",
+        "target_description": "",
+    }
+
+
+async def process_country(
+    *,
+    browser,
+    semaphore: asyncio.Semaphore,
+    args: argparse.Namespace,
+    rows: list[dict[str, str]],
+    city_names: set[str],
+    links_by_country: dict[str, list[str]],
+    towns: list[str],
+    stop_flag: Path,
+    country_slug: str,
+    emit_row,
+) -> bool:
+    async with semaphore:
+        if stop_flag.exists():
+            return True
+
+        country_started_at = time.monotonic()
+
+        def debug_log(message: str) -> None:
+            if args.debug_stages:
+                elapsed = time.monotonic() - country_started_at
+                print(f"[debug] {country_slug} +{elapsed:.1f}s {message}", flush=True)
+
         context = await browser.new_context(
             locale="ru-RU",
             timezone_id="Europe/Moscow",
@@ -938,29 +1065,31 @@ async def run_core(
         details_page.set_default_timeout(args.timeout_ms)
 
         base_link_cache: dict[str, dict[str, str]] = {}
-
-        for country_slug in countries:
-            if stop_flag.exists():
-                stop_requested = True
-                break
-
+        stop_requested = False
+        try:
+            debug_log("worker started")
             base_links = links_by_country.get(country_slug, [])
             if args.base_link:
                 base_links = [args.base_link]
             if args.max_hotels > 0:
                 base_links = base_links[: args.max_hotels]
             if not base_links:
+                debug_log("discovering base links")
                 base_links = await discover_base_links_for_country(details_page, country_slug, max_links=args.max_hotels)
+                debug_log(f"discovered {len(base_links)} base links")
 
             if rows:
                 common_description = country_description_from_rows(rows, country_slug, city_names)
+                debug_log(f"country description from rows len={len(common_description)}")
             else:
                 desc_town = towns[0] if towns else DEFAULT_PARAMS.get("TOWNFROM", "moskva")
+                debug_log(f"fetching country description for town={desc_town}")
                 common_description = await fetch_country_common_description(
                     details_page,
                     town=desc_town,
                     country_slug=country_slug,
                 )
+                debug_log(f"country description fetched len={len(common_description)}")
             print(f"[info] country: {country_slug}, hotels={len(base_links)}")
 
             for base_link in base_links:
@@ -972,21 +1101,21 @@ async def run_core(
                     base_details = base_link_cache[base_link]
                 else:
                     try:
+                        debug_log(f"loading hotel page {base_link}")
                         await details_page.goto(base_link, wait_until="domcontentloaded")
                         try:
                             await details_page.wait_for_load_state("networkidle", timeout=8000)
                         except PlaywrightTimeoutError:
                             pass
                         base_details = await extract_base_hotel_details(details_page)
+                        debug_log(
+                            "hotel details loaded "
+                            f"name={bool(base_details.get('hotel_name'))} "
+                            f"target_len={len(base_details.get('target_description', ''))}"
+                        )
                     except Exception:
-                        base_details = {
-                            "hotel_name": "",
-                            "hotel_rating": "",
-                            "hotel_stars": "",
-                            "hotel_type": "",
-                            "main_image_url": "",
-                            "target_description": "",
-                        }
+                        debug_log(f"hotel details failed for {base_link}")
+                        base_details = _empty_base_details()
                     base_link_cache[base_link] = base_details
 
                 for town in towns:
@@ -994,6 +1123,7 @@ async def run_core(
                         stop_requested = True
                         break
 
+                    debug_log(f"finding first working date for town={town}")
                     first_beg = await find_first_working_date(
                         page,
                         base_link,
@@ -1003,8 +1133,10 @@ async def run_core(
                         max_days=args.max_date_probe_days,
                     )
                     if not first_beg:
+                        debug_log(f"no working date for town={town}")
                         print(f"[warn] no working date: {base_link} / {town}")
                         continue
+                    debug_log(f"first working date={first_beg} for town={town}")
 
                     beg_date = datetime.strptime(first_beg, "%Y%m%d").date()
                     end_date = (beg_date + timedelta(days=7)).strftime("%Y%m%d")
@@ -1037,10 +1169,15 @@ async def run_core(
                                 req_url = build_url(base_link, params)
 
                                 try:
+                                    debug_log(
+                                        f"loading offers town={town} adult={adult} child={child} nights={nmin}-{nmax}"
+                                    )
                                     await page.goto(req_url, wait_until="domcontentloaded")
                                 except PlaywrightTimeoutError:
+                                    debug_log("offers page goto timeout")
                                     continue
                                 except Exception:
+                                    debug_log("offers page goto failed")
                                     continue
                                 try:
                                     await page.wait_for_load_state("networkidle", timeout=8000)
@@ -1049,10 +1186,12 @@ async def run_core(
 
                                 await click_show_more_until_end(page)
                                 offers = await extract_offer_cards(page)
+                                debug_log(
+                                    f"offers extracted count={len(offers)} town={town} adult={adult} child={child} nights={nmin}-{nmax}"
+                                )
 
-                                for o in offers:
-                                    booking_link = o.get("booking_link", "")
-                                    emit_row(
+                                for offer in offers:
+                                    await emit_row(
                                         asdict(
                                             ParsedTour(
                                                 country_slug=country_slug,
@@ -1072,18 +1211,20 @@ async def run_core(
                                                 main_image_url=base_details.get("main_image_url", ""),
                                                 common_description=common_description,
                                                 target_description=base_details.get("target_description", ""),
-                                                functions=o.get("functions", ""),
-                                                trip_dates=o.get("trip_dates", ""),
-                                                nights=o.get("nights", ""),
-                                                room=o.get("room", ""),
-                                                meal=o.get("meal", ""),
-                                                placement=o.get("placement", ""),
-                                                price=o.get("price", ""),
-                                                booking_link=booking_link,
-                                                raw_text=o.get("raw_text", ""),
+                                                functions=offer.get("functions", ""),
+                                                trip_dates=offer.get("trip_dates", ""),
+                                                nights=offer.get("nights", ""),
+                                                room=offer.get("room", ""),
+                                                meal=offer.get("meal", ""),
+                                                placement=offer.get("placement", ""),
+                                                price=offer.get("price", ""),
+                                                booking_link=offer.get("booking_link", ""),
+                                                raw_text=offer.get("raw_text", ""),
                                             )
                                         )
                                     )
+                                if offers:
+                                    debug_log(f"emitted {len(offers)} rows")
 
                                 print(
                                     f"[ok] {country_slug} {town} A{adult} C{child} N{nmin}-{nmax} "
@@ -1098,13 +1239,11 @@ async def run_core(
                         break
                 if stop_requested:
                     break
-            if stop_requested:
-                break
+        finally:
+            debug_log("closing worker context")
+            await context.close()
 
-        await context.close()
-        await browser.close()
-
-    return stop_requested
+        return stop_requested
 
 def build_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate available tours csv/json for all countries")
@@ -1126,8 +1265,16 @@ def build_args() -> argparse.Namespace:
     p.add_argument("--adult-max", type=int, default=10, help="Max adults (start is always 1)")
     p.add_argument("--child-max", type=int, default=10, help="Max children (start is always 0)")
     p.add_argument("--flush-interval-sec", type=int, default=120, help="Flush partial results every N seconds")
+    p.add_argument("--country-workers", type=int, default=20, help="How many countries to parse in parallel")
+    p.add_argument("--db-batch-size", type=int, default=200, help="Batch size for direct DB writes")
+    p.add_argument("--debug-stages", action="store_true", help="Print detailed stage-by-stage parser diagnostics")
+    p.add_argument("--write-db", dest="write_db", action="store_true", help="Write parsed tours directly to Django DB")
+    p.add_argument("--no-write-db", dest="write_db", action="store_false", help="Disable direct DB writes")
+    p.add_argument("--write-output", action="store_true", help="Additionally save parsed rows to CSV/JSON files")
+    p.add_argument("--reset-db", action="store_true", help="Truncate tours-related tables before direct DB write")
     p.add_argument("--stop-flag", default="", help="Path to stop flag file for safe stop")
     p.add_argument("--reset-output", action="store_true", help="Remove old out files before run")
+    p.set_defaults(write_db=True)
     return p.parse_args()
 
 def main() -> None:

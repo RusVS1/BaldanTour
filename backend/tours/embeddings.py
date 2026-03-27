@@ -9,7 +9,7 @@ from typing import Any
 import requests
 
 
-DEFAULT_DIM = 1536
+DEFAULT_DIM = 768
 
 
 def _get_dim() -> int:
@@ -32,6 +32,8 @@ class Embedder:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if self.provider == "openai":
             return _openai_embed(texts, self.dim)
+        if self.provider in ("st", "sentence_transformers", "sentence-transformers"):
+            return _st_embed(texts, expected_dim=self.dim)
         if self.provider == "dummy":
             return [_dummy_embed(t, self.dim) for t in texts]
         raise RuntimeError(f"Unknown EMBEDDINGS_PROVIDER: {self.provider}")
@@ -40,9 +42,26 @@ class Embedder:
 def get_embedder() -> Embedder:
     provider = (os.environ.get("EMBEDDINGS_PROVIDER") or "").strip().lower()
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    dim = _get_dim()
+
     if not provider:
-        provider = "openai" if api_key else "dummy"
-    return Embedder(provider=provider, dim=_get_dim())
+        # Prefer a local open-source multilingual model if available.
+        if _can_use_sentence_transformers():
+            provider = "sentence_transformers"
+        else:
+            provider = "openai" if api_key else "dummy"
+
+    if provider in ("st", "sentence_transformers", "sentence-transformers"):
+        # Use the real model dimension to avoid silent mismatches.
+        model_dim = _st_model_dim()
+        if dim and model_dim and dim != model_dim:
+            raise RuntimeError(
+                f"EMBEDDING_DIM={dim} but sentence-transformers model dim is {model_dim}. "
+                "Set EMBEDDING_DIM to match the model (or unset it)."
+            )
+        dim = model_dim or dim
+
+    return Embedder(provider=provider, dim=dim)
 
 
 def _dummy_embed(text: str, dim: int) -> list[float]:
@@ -89,3 +108,60 @@ def _openai_embed(texts: list[str], expected_dim: int) -> list[list[float]]:
 
     return [_normalize([float(x) for x in v]) for v in vectors]
 
+
+_ST_MODEL = None
+
+
+def _can_use_sentence_transformers() -> bool:
+    try:
+        import sentence_transformers  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _get_st_model():
+    global _ST_MODEL
+    if _ST_MODEL is not None:
+        return _ST_MODEL
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except Exception as e:
+        raise RuntimeError(
+            "sentence-transformers is not installed. Add it to requirements.txt "
+            "or set EMBEDDINGS_PROVIDER=dummy/openai."
+        ) from e
+
+    # Open multilingual text embedding model with 768-dim output.
+    model_name = (
+        os.environ.get("ST_EMBEDDING_MODEL")
+        or os.environ.get("HF_EMBEDDING_MODEL")
+        or "ibm-granite/granite-embedding-278m-multilingual"
+    ).strip()
+
+    _ST_MODEL = SentenceTransformer(model_name)
+    return _ST_MODEL
+
+
+def _st_model_dim() -> int:
+    model = _get_st_model()
+    try:
+        return int(model.get_sentence_embedding_dimension())
+    except Exception:
+        # Fallback: infer from a single encode.
+        vec = model.encode(["dim_probe"], normalize_embeddings=True)
+        return int(len(vec[0]))
+
+
+def _st_embed(texts: list[str], *, expected_dim: int) -> list[list[float]]:
+    model = _get_st_model()
+    vectors = model.encode(texts, normalize_embeddings=True)
+
+    out: list[list[float]] = []
+    for v in vectors:
+        row = [float(x) for x in v]
+        if expected_dim and len(row) != expected_dim:
+            raise RuntimeError(f"Embedding dim mismatch: expected {expected_dim}, got {len(row)}.")
+        out.append(row)
+    return out
