@@ -30,6 +30,7 @@ PY
 
 exec python -u -m parser.main \
   --headless \
+  --root /app \
   --country-workers "${PARSER_COUNTRY_WORKERS:-20}" \
   --db-batch-size "${PARSER_DB_BATCH_SIZE:-200}" \
   ${PARSER_EXTRA_ARGS:-}

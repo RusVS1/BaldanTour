@@ -24,8 +24,9 @@ RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /app/parser/requirements.txt
 
 COPY . /app
+RUN chmod +x /app/parser/entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "from playwright.sync_api import sync_playwright; print('OK')" || exit 1
 
-CMD ["python", "-m", "parser.main", "--headless", "--root", "/app"]
+ENTRYPOINT ["/app/parser/entrypoint.sh"]
