@@ -1236,7 +1236,7 @@ class AISearchAPI(APIView):
             embedding_model = (
                 os.environ.get("ST_EMBEDDING_MODEL")
                 or os.environ.get("HF_EMBEDDING_MODEL")
-                or "ibm-granite/granite-embedding-278m-multilingual"
+                or "intfloat/multilingual-e5-base"
             ).strip()
 
         return Response(
