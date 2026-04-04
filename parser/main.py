@@ -1,9 +1,13 @@
-﻿from __future__ import annotations
+﻿#!/usr/bin/env python3
+from __future__ import annotations
 
 import argparse
 import asyncio
+import calendar
 import csv
+import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -13,12 +17,29 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from asgiref.sync import sync_to_async
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+import psycopg
+from pgvector.psycopg import register_vector
 
 
 NIGHT_RANGES = [(1, 8), (9, 16), (17, 24), (25, 28)]
 
+
+def _default_checkin_window() -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=4)
+    month_index = start_date.month - 1 + 7
+    year = start_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(start_date.day, calendar.monthrange(year, month)[1])
+    end_date = date(year, month, day)
+    return start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")
+
+
+DEFAULT_CHECKIN_BEG, DEFAULT_MAX_CHECKIN_BEG = _default_checkin_window()
+
+# Defaults embedded in code (so container runs do not depend on external CSV/text files).
 DEFAULT_TOWNS = [
     "moskva",
     "sankt-peterburg",
@@ -121,6 +142,7 @@ DEFAULT_COUNTRY_SLUGS = [
     "vietnam",
 ]
 
+# Increase CSV field size limit for large "details" cells.
 try:
     csv.field_size_limit(sys.maxsize)
 except OverflowError:
@@ -145,8 +167,8 @@ DEFAULT_PARAMS = {
     "FIELD_WITHOUT_FLIGHT": "0",
     "NIGHTMAX": "2",
     "NIGHTMIN": "2",
-    "CHECKIN_BEG": "20260313",
-    "CHECKIN_END": "20260320",
+    "CHECKIN_BEG": DEFAULT_CHECKIN_BEG,
+    "CHECKIN_END": DEFAULT_MAX_CHECKIN_BEG,
 }
 
 
@@ -178,6 +200,495 @@ class ParsedTour:
     price: str
     booking_link: str
     raw_text: str
+
+
+COUNTRY_SLUG_TO_RU: dict[str, str] = {
+    "abkhazia": "Абхазия",
+    "andorra": "Андорра",
+    "argentina": "Аргентина",
+    "armenia": "Армения",
+    "aruba": "Аруба",
+    "austria": "Австрия",
+    "azerbaijan": "Азербайджан",
+    "bahrain": "Бахрейн",
+    "belarus": "Беларусь",
+    "belgium": "Бельгия",
+    "brazil": "Бразилия",
+    "bulgaria": "Болгария",
+    "cambodia": "Камбоджа",
+    "cape-verde": "Кабо-Верде",
+    "chile": "Чили",
+    "china": "Китай",
+    "china-hong-kong-sar": "Гонконг",
+    "china-macau-sar": "Макао",
+    "costa-rica": "Коста-Рика",
+    "croatia": "Хорватия",
+    "cuba": "Куба",
+    "cyprus": "Кипр",
+    "czech-republic": "Чехия",
+    "dominican-republic": "Доминикана",
+    "egypt": "Египет",
+    "fiji": "Фиджи",
+    "france": "Франция",
+    "georgia": "Грузия",
+    "germany": "Германия",
+    "greece": "Греция",
+    "hungary": "Венгрия",
+    "india": "Индия",
+    "indonesia": "Индонезия",
+    "israel": "Израиль",
+    "italy": "Италия",
+    "jamaica": "Ямайка",
+    "japan": "Япония",
+    "jordan": "Иордания",
+    "kazakhstan": "Казахстан",
+    "kenya": "Кения",
+    "kyrgyzstan": "Кыргызстан",
+    "lebanon": "Ливан",
+    "madagascar": "Мадагаскар",
+    "malaysia": "Малайзия",
+    "maldives": "Мальдивы",
+    "malta": "Мальта",
+    "mauritius": "Мавритания",
+    "mexico": "Мексика",
+    "mongolia": "Монголия",
+    "montenegro": "Черногория",
+    "morocco": "Марокко",
+    "namibia": "Намибия",
+    "nepal": "Непал",
+    "netherlands": "Нидерланды",
+    "oman": "Оман",
+    "panama": "Панама",
+    "peru": "Перу",
+    "philippines": "Филиппины",
+    "portugal": "Португалия",
+    "qatar": "Катар",
+    "russia": "Россия",
+    "saudi-arabia": "Саудовская Аравия",
+    "serbia": "Сербия",
+    "seychelles": "Сейшелы",
+    "singapore": "Сингапур",
+    "slovenia": "Словения",
+    "south-korea": "Южная Корея",
+    "spain": "Испания",
+    "sri-lanka": "Шри-Ланка",
+    "switzerland": "Швейцария",
+    "tanzania": "Танзания",
+    "thailand": "Таиланд",
+    "tunisia": "Тунис",
+    "turkey": "Турция",
+    "turkmenistan": "Туркменистан",
+    "uae": "ОАЭ",
+    "uruguay": "Уругвай",
+    "uzbekistan": "Узбекистан",
+    "vietnam": "Вьетнам",
+}
+
+TOWNFROM_SLUG_TO_RU: dict[str, str] = {
+    "barnaul": "Барнаул",
+    "chelyabinsk": "Челябинск",
+    "ekaterinburg": "Екатеринбург",
+    "kaliningrad": "Калининград",
+    "kazan": "Казань",
+    "krasnodar": "Краснодар",
+    "n-novgorod": "Нижний Новгород",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "perm": "Пермь",
+    "rostov-na-donu": "Ростов-на-Дону",
+    "samara": "Самара",
+    "sankt-peterburg": "Санкт-Петербург",
+    "tyumen": "Тюмень",
+    "vladivostok": "Владивосток",
+    "volgograd": "Волгоград",
+    "moskva": "Москва",
+    "moscow": "Москва",
+    "spb": "Санкт-Петербург",
+}
+
+
+def _slugify_ascii(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9а-яё]+", "-", value)
+    value = value.strip("-")
+    return value[:64]
+
+
+def build_db_emitter(batch_size: int):
+    from tours.embeddings import get_embedder
+
+    def parse_int_db(value: str | int | None) -> int | None:
+        if value is None:
+            return None
+        value = str(value).strip()
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    def parse_date_yyyymmdd_db(value: str | None) -> date | None:
+        value = (value or "").strip()
+        if not value:
+            return None
+        try:
+            year = int(value[0:4])
+            month = int(value[4:6])
+            day = int(value[6:8])
+            return date(year, month, day)
+        except Exception:
+            return None
+
+    def parse_price_db(value: str | None) -> tuple[int | None, str]:
+        text = (value or "").strip()
+        digits = re.findall(r"\d+", text)
+        if not digits:
+            return None, text
+        try:
+            return int("".join(digits)), text
+        except ValueError:
+            return None, text
+
+    def split_amenities_db(value: str | None) -> list[str]:
+        if not value:
+            return []
+        parts = [p.strip() for p in value.split(";") if p.strip()]
+        seen: set[str] = set()
+        result: list[str] = []
+        for part in parts:
+            slug = _slugify_ascii(part)
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            result.append(slug)
+        return result
+
+    def parse_rest_type_db(*values: str | None) -> str:
+        text = " ".join([v for v in values if v]).lower()
+        if not text:
+            return ""
+        if "пляж" in text or "море" in text:
+            return "пляжный"
+        if "город" in text or "экскурс" in text:
+            return "городской"
+        return ""
+
+    def parse_hotel_type_db(*values: str | None) -> str:
+        text = " ".join([v for v in values if v]).lower()
+        if not text:
+            return ""
+        if "для взрослых" in text or "взросл" in text or "adults only" in text or "adult only" in text:
+            return "Для взрослых"
+        if "для детей" in text or "детск" in text or "с детьми" in text or "дет" in text:
+            return "Для детей"
+        return ""
+
+    def normalize_hotel_type_db(value: str | None) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        lower = value.lower()
+        if "взросл" in lower or "adults only" in lower or "adult only" in lower:
+            return "Для взрослых"
+        if "дет" in lower or "с детьми" in lower:
+            return "Для детей"
+        return value
+
+    def sha256_text_db(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    infra_re = re.compile(r"\bинфраструктура\b", flags=re.IGNORECASE)
+    rules_re = re.compile(r"правила\s+размещения\s+в\s+отелях", flags=re.IGNORECASE)
+
+    def extract_answer_description_db(target_desc: str) -> str:
+        target_desc = (target_desc or "").strip()
+        if not target_desc:
+            return ""
+        match = infra_re.search(target_desc)
+        extracted = target_desc if not match else target_desc[: match.start()].strip()
+        return rules_re.sub("", extracted).strip()
+
+    def to_ru_label_db(value: str | None, mapping: dict[str, str]) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if re.search(r"[А-Яа-яЁё]", text):
+            return text
+        return mapping.get(text, text)
+
+    class ParserDBWriter:
+        def __init__(self, *, batch_size: int):
+            self.batch_size = batch_size
+            self.total_flushed = 0
+            self.to_create: list[dict[str, Any]] = []
+            self.pending_amenities: list[list[str]] = []
+            self.pending_text_hashes: list[tuple[str | None, str | None, str | None]] = []
+            self.text_by_hash: dict[str, str] = {}
+            self.pending_image_hashes: list[str | None] = []
+            self.image_by_hash: dict[str, str] = {}
+            self.pending_embed_texts: list[str] = []
+            self._conn: psycopg.Connection | None = None
+            self.embedder = get_embedder()
+
+        def _get_conn(self) -> psycopg.Connection:
+            if self._conn is None or self._conn.closed:
+                self._conn = psycopg.connect(
+                    host=os.environ.get("POSTGRES_HOST", "127.0.0.1"),
+                    port=int(os.environ.get("POSTGRES_PORT", "5432")),
+                    dbname=os.environ.get("POSTGRES_DB", "tour_aggregator"),
+                    user=os.environ.get("POSTGRES_USER", "tour_aggregator"),
+                    password=os.environ.get("POSTGRES_PASSWORD", "tour_aggregator"),
+                    connect_timeout=10,
+                )
+                register_vector(self._conn)
+            return self._conn
+
+        def add_row(self, row: dict[str, Any]) -> None:
+            price_value, price_text = parse_price_db(row.get("price"))
+            common_desc = str(row.get("common_description") or "").strip()
+            target_desc = str(row.get("target_description") or "").strip()
+            answer_desc = extract_answer_description_db(target_desc)
+
+            common_hash = sha256_text_db(common_desc) if common_desc else None
+            target_hash = sha256_text_db(target_desc) if target_desc else None
+            answer_hash = sha256_text_db(answer_desc) if answer_desc else None
+            for hash_value, content in (
+                (common_hash, common_desc),
+                (target_hash, target_desc),
+                (answer_hash, answer_desc),
+            ):
+                if hash_value and hash_value not in self.text_by_hash:
+                    self.text_by_hash[hash_value] = content
+
+            country_slug = str(row.get("country_slug") or "").strip()
+            townfrom = str(row.get("townfrom") or "").strip()
+            image_url = str(row.get("main_image_url") or "").strip() or None
+            image_hash = sha256_text_db(image_url) if image_url else None
+            if image_hash and image_hash not in self.image_by_hash:
+                self.image_by_hash[image_hash] = image_url or ""
+
+            direct_hotel_type = normalize_hotel_type_db(str(row.get("hotel_type") or ""))
+            hotel_category = parse_int_db(row.get("hotel_stars"))
+
+            embed_text = " ".join(
+                [
+                    str(row.get("hotel_name") or "").strip(),
+                    str(row.get("meal") or "").strip(),
+                    str(row.get("placement") or "").strip(),
+                    str(row.get("room") or "").strip(),
+                    common_desc,
+                    target_desc,
+                    answer_desc,
+                    str(row.get("raw_text") or "").strip(),
+                ]
+            ).strip()
+
+            tour = {
+                "country_slug": country_slug,
+                "country_ru": to_ru_label_db(country_slug, COUNTRY_SLUG_TO_RU),
+                "base_link": str(row.get("base_link") or "").strip() or None,
+                "request_url": str(row.get("request_url") or "").strip(),
+                "townfrom": townfrom,
+                "townfrom_ru": to_ru_label_db(townfrom, TOWNFROM_SLUG_TO_RU),
+                "adult": parse_int_db(row.get("adult")) or 0,
+                "child": parse_int_db(row.get("child")) or 0,
+                "night_min": parse_int_db(row.get("night_min")),
+                "night_max": parse_int_db(row.get("night_max")),
+                "checkin_beg": parse_date_yyyymmdd_db(str(row.get("checkin_beg") or "")),
+                "checkin_end": parse_date_yyyymmdd_db(str(row.get("checkin_end") or "")),
+                "hotel_name": str(row.get("hotel_name") or "").strip(),
+                "hotel_rating": str(row.get("hotel_rating") or "").strip(),
+                "trip_dates": str(row.get("trip_dates") or "").strip(),
+                "nights": parse_int_db(row.get("nights")),
+                "room": str(row.get("room") or "").strip(),
+                "meal": str(row.get("meal") or "").strip(),
+                "placement": str(row.get("placement") or "").strip(),
+                "rest_type": parse_rest_type_db(common_desc, target_desc, str(row.get("raw_text") or "")),
+                "hotel_type": direct_hotel_type or parse_hotel_type_db(target_desc, common_desc, str(row.get("raw_text") or "")),
+                "hotel_category": hotel_category,
+                "price_text": price_text,
+                "price_value": price_value,
+                "booking_link": str(row.get("booking_link") or "").strip() or None,
+                "raw_text": str(row.get("raw_text") or "").strip(),
+            }
+
+            self.to_create.append(tour)
+            self.pending_amenities.append(split_amenities_db(str(row.get("functions") or "")))
+            self.pending_text_hashes.append((common_hash, target_hash, answer_hash))
+            self.pending_image_hashes.append(image_hash)
+            self.pending_embed_texts.append(embed_text)
+
+            if len(self.to_create) >= self.batch_size:
+                self.flush()
+
+        def flush(self) -> int:
+            tours = self.to_create
+            if not tours:
+                return 0
+
+            booking_links = [tour["booking_link"] for tour in tours if tour["booking_link"]]
+            if not booking_links and not any(tour["request_url"] for tour in tours):
+                self._reset_batch()
+                return 0
+
+            if self.pending_embed_texts:
+                try:
+                    vectors = self.embedder.embed_texts(self.pending_embed_texts)
+                    for tour, vector in zip(tours, vectors, strict=False):
+                        tour["embedding"] = vector
+                except Exception as exc:
+                    print(f"[db] WARNING: embeddings skipped for batch: {exc}", flush=True)
+
+            conn = self._get_conn()
+            with conn.transaction():
+                amenity_slugs = sorted({slug for slugs in self.pending_amenities for slug in slugs})
+                slug_to_id: dict[str, int] = {}
+                with conn.cursor() as cur:
+                    if amenity_slugs:
+                        cur.executemany(
+                            "INSERT INTO tours_amenity (slug, name) VALUES (%s, %s) ON CONFLICT (slug) DO NOTHING",
+                            [(slug, slug.replace("-", " ")) for slug in amenity_slugs],
+                        )
+                        cur.execute(
+                            "SELECT id, slug FROM tours_amenity WHERE slug = ANY(%s)",
+                            (amenity_slugs,),
+                        )
+                        slug_to_id = {slug: id_ for (id_, slug) in cur.fetchall()}
+
+                    text_hashes = sorted({hash_value for pair in self.pending_text_hashes for hash_value in pair if hash_value})
+                    text_id_by_hash: dict[str, int] = {}
+                    if text_hashes:
+                        cur.executemany(
+                            "INSERT INTO tours_tourtext (sha256, content) VALUES (%s, %s) ON CONFLICT (sha256) DO NOTHING",
+                            [(hash_value, self.text_by_hash.get(hash_value, "")) for hash_value in text_hashes],
+                        )
+                        cur.execute(
+                            "SELECT id, sha256 FROM tours_tourtext WHERE sha256 = ANY(%s)",
+                            (text_hashes,),
+                        )
+                        text_id_by_hash = {sha256: id_ for (id_, sha256) in cur.fetchall()}
+
+                    image_hashes = sorted({hash_value for hash_value in self.pending_image_hashes if hash_value})
+                    image_id_by_hash: dict[str, int] = {}
+                    if image_hashes:
+                        cur.executemany(
+                            "INSERT INTO tours_tourimage (sha256, url) VALUES (%s, %s) ON CONFLICT (sha256) DO NOTHING",
+                            [(hash_value, self.image_by_hash.get(hash_value, "")) for hash_value in image_hashes],
+                        )
+                        cur.execute(
+                            "SELECT id, sha256 FROM tours_tourimage WHERE sha256 = ANY(%s)",
+                            (image_hashes,),
+                        )
+                        image_id_by_hash = {sha256: id_ for (id_, sha256) in cur.fetchall()}
+
+                    for tour, (common_hash, target_hash, answer_hash), image_hash in zip(
+                        tours, self.pending_text_hashes, self.pending_image_hashes, strict=False
+                    ):
+                        tour["common_description_id"] = text_id_by_hash.get(common_hash) if common_hash else None
+                        tour["target_description_id"] = text_id_by_hash.get(target_hash) if target_hash else None
+                        tour["answer_description_id"] = text_id_by_hash.get(answer_hash) if answer_hash else None
+                        tour["main_image_id"] = image_id_by_hash.get(image_hash) if image_hash else None
+
+                    existing_by_booking: dict[str, int] = {}
+                    if booking_links:
+                        cur.execute(
+                            "SELECT id, booking_link FROM tours_tour WHERE booking_link = ANY(%s)",
+                            (booking_links,),
+                        )
+                        existing_by_booking = {booking_link: id_ for (id_, booking_link) in cur.fetchall() if booking_link}
+
+                    insert_rows = [tour for tour in tours if not tour["booking_link"] or tour["booking_link"] not in existing_by_booking]
+                    created_by_booking = dict(existing_by_booking)
+                    if insert_rows:
+                        cur.executemany(
+                            """
+                            INSERT INTO tours_tour (
+                                country_slug, country_ru, base_link, request_url, townfrom, townfrom_ru,
+                                adult, child, night_min, night_max, checkin_beg, checkin_end,
+                                hotel_name, hotel_rating, main_image_id,
+                                common_description_id, target_description_id, answer_description_id,
+                                trip_dates, nights, room, meal, placement,
+                                rest_type, hotel_type, hotel_category,
+                                price_text, price_value, embedding, booking_link, raw_text,
+                                created_at, updated_at
+                            ) VALUES (
+                                %(country_slug)s, %(country_ru)s, %(base_link)s, %(request_url)s, %(townfrom)s, %(townfrom_ru)s,
+                                %(adult)s, %(child)s, %(night_min)s, %(night_max)s, %(checkin_beg)s, %(checkin_end)s,
+                                %(hotel_name)s, %(hotel_rating)s, %(main_image_id)s,
+                                %(common_description_id)s, %(target_description_id)s, %(answer_description_id)s,
+                                %(trip_dates)s, %(nights)s, %(room)s, %(meal)s, %(placement)s,
+                                %(rest_type)s, %(hotel_type)s, %(hotel_category)s,
+                                %(price_text)s, %(price_value)s, %(embedding)s, %(booking_link)s, %(raw_text)s,
+                                NOW(), NOW()
+                            )
+                            """,
+                            insert_rows,
+                        )
+                        created_links = [tour["booking_link"] for tour in insert_rows if tour["booking_link"]]
+                        if created_links:
+                            cur.execute(
+                                "SELECT id, booking_link FROM tours_tour WHERE booking_link = ANY(%s)",
+                                (created_links,),
+                            )
+                            created_by_booking = {booking_link: id_ for (id_, booking_link) in cur.fetchall() if booking_link}
+
+                    relations = []
+                    for tour, slugs in zip(tours, self.pending_amenities, strict=False):
+                        tour_id = created_by_booking.get(tour["booking_link"]) if tour["booking_link"] else None
+                        if not tour_id:
+                            continue
+                        for slug in slugs:
+                            amenity_id = slug_to_id.get(slug)
+                            if amenity_id:
+                                relations.append((tour_id, amenity_id))
+                    if relations:
+                        cur.executemany(
+                            "INSERT INTO tours_tour_amenities (tour_id, amenity_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                            relations,
+                        )
+
+            flushed = len(tours)
+            self.total_flushed += flushed
+            self._reset_batch()
+            return flushed
+
+        def finalize(self) -> int:
+            self.flush()
+            return self.total_flushed
+
+        def truncate_all(self) -> None:
+            conn = self._get_conn()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM tours_favorite")
+                    cur.execute("DELETE FROM tours_tour_amenities")
+                    cur.execute("DELETE FROM tours_amenity")
+                    cur.execute("DELETE FROM tours_tour")
+                    cur.execute("DELETE FROM tours_tourtext")
+                    cur.execute("DELETE FROM tours_tourimage")
+
+        def _reset_batch(self) -> None:
+            self.to_create = []
+            self.pending_amenities = []
+            self.pending_text_hashes = []
+            self.text_by_hash = {}
+            self.pending_image_hashes = []
+            self.image_by_hash = {}
+            self.pending_embed_texts = []
+
+    importer = ParserDBWriter(batch_size=batch_size)
+
+    async def emit(row: dict[str, Any]) -> None:
+        await sync_to_async(importer.add_row, thread_sensitive=True)(row)
+
+    async def finalize() -> int:
+        return await sync_to_async(importer.finalize, thread_sensitive=True)()
+
+    async def truncate() -> None:
+        await sync_to_async(importer.truncate_all, thread_sensitive=True)()
+
+    return emit, finalize, truncate
 
 
 def normalize_space(value: str) -> str:
@@ -268,6 +779,7 @@ def country_description_from_rows(rows: list[dict[str, str]], country_slug: str,
         if c != country_slug or not has_city:
             continue
 
+        # Prefer details JSON body text/description when available
         details = row.get("details", "")
         if details:
             try:
@@ -280,6 +792,7 @@ def country_description_from_rows(rows: list[dict[str, str]], country_slug: str,
             except Exception:
                 pass
 
+        # Fallback raw_text column
         seg = extract_description_segment(row.get("raw_text", ""))
         if seg:
             return seg
@@ -358,6 +871,7 @@ async def discover_base_links_for_country(page, country_slug: str, *, max_links:
             continue
         if parts[1].lower() != country_slug.lower():
             continue
+        # ensure no query, no fragment: base link only
         if p.query or p.fragment:
             continue
         clean = urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
@@ -409,6 +923,7 @@ def collect_country_links(rows: list[dict[str, str]], city_names: set[str]) -> d
         if not country:
             continue
         if has_city:
+            # skip city-prefixed links for base hotel list
             continue
         links_by_country.setdefault(country, []).append(link)
 
@@ -705,6 +1220,7 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
                     pass
                 await page.wait_for_timeout(700)
 
+        # Build target_description from two tabs: "Информация" + "Услуги и питание"
         info_text = ""
         services_text = ""
         try:
@@ -830,9 +1346,12 @@ def materialize_json_from_jsonl(jsonl_path: Path, json_out: Path) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
+    # Default mode: fully self-contained discovery (no CSV required).
     rows: list[dict[str, str]] = []
     city_names: set[str] = set(DEFAULT_TOWNS)
     links_by_country: dict[str, list[str]] = {}
+    root = Path(args.root)
+    project_root = Path(__file__).resolve().parent.parent
 
     countries = select_countries(args.country_slug, args.country_slugs, args.max_countries)
     towns = select_towns(args.townfrom, args.max_towns)
@@ -845,13 +1364,23 @@ async def run(args: argparse.Namespace) -> None:
     json_out = Path(args.out_json)
     jsonl_out = Path(str(json_out) + ".jsonl")
 
-    stop_flag = Path(args.stop_flag) if args.stop_flag else (Path(args.root) / "STOP_PARSING.flag")
+    stop_flag = Path(args.stop_flag) if args.stop_flag else (project_root / "STOP_PARSING.flag")
+    if args.debug_stages:
+        print(f"[debug] stop_flag path: {stop_flag}", flush=True)
     flush_interval = max(10, args.flush_interval_sec)
+    db_emit = None
+    db_finalize = None
+    db_truncate = None
 
-    if args.reset_output:
+    if args.write_db:
+        db_emit, db_finalize, db_truncate = build_db_emitter(args.db_batch_size)
+
+    if args.reset_output and args.write_output:
         for p in (csv_out, json_out, jsonl_out):
             if p.exists():
                 p.unlink()
+    if args.reset_db and db_truncate is not None:
+        await db_truncate()
 
     fieldnames = list(ParsedTour.__annotations__.keys())
     buffer: list[dict[str, Any]] = []
@@ -861,6 +1390,10 @@ async def run(args: argparse.Namespace) -> None:
 
     def flush(force: bool = False) -> None:
         nonlocal buffer, total_written, last_flush
+        if not args.write_output:
+            buffer = []
+            last_flush = time.monotonic()
+            return
         now = time.monotonic()
         if not buffer:
             return
@@ -874,7 +1407,9 @@ async def run(args: argparse.Namespace) -> None:
         buffer = []
         last_flush = now
 
-    def emit_row(row: dict[str, Any]) -> None:
+    async def emit_row(row: dict[str, Any]) -> None:
+        if db_emit is not None:
+            await db_emit(row)
         buffer.append(row)
         flush(force=False)
 
@@ -890,13 +1425,18 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     flush(force=True)
-    materialize_json_from_jsonl(jsonl_out, json_out)
+    if db_finalize is not None:
+        written_to_db = await db_finalize()
+        print(f"[done] db_rows_flushed: {written_to_db}")
+    if args.write_output:
+        materialize_json_from_jsonl(jsonl_out, json_out)
 
     status = "stopped_by_flag" if stop_requested else "completed"
     print(f"[done] status: {status}")
-    print(f"[done] json: {json_out}")
-    print(f"[done] csv:  {csv_out}")
-    print(f"[done] rows_written: {total_written}")
+    if args.write_output:
+        print(f"[done] json: {json_out}")
+        print(f"[done] csv:  {csv_out}")
+        print(f"[done] rows_written: {total_written}")
 
 async def run_core(
     args: argparse.Namespace,
@@ -915,9 +1455,91 @@ async def run_core(
 
     This allows writing to other sinks (e.g. direct DB upserts) without CSV промежуточных файлов.
     """
-    stop_requested = False
+    if args.debug_stages:
+        print("[debug] run_core: entering async_playwright", flush=True)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=args.headless)
+        if args.debug_stages:
+            print("[debug] run_core: launching browser", flush=True)
+        browser = await p.chromium.launch(
+            headless=args.headless,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
+        if args.debug_stages:
+            print("[debug] run_core: browser launched", flush=True)
+        semaphore = asyncio.Semaphore(max(1, args.country_workers))
+        tasks = [
+            asyncio.create_task(
+                process_country(
+                    browser=browser,
+                    semaphore=semaphore,
+                    args=args,
+                    rows=rows,
+                    city_names=city_names,
+                    links_by_country=links_by_country,
+                    towns=towns,
+                    stop_flag=stop_flag,
+                    country_slug=country_slug,
+                    emit_row=emit_row,
+                )
+            )
+            for country_slug in countries
+        ]
+        if args.debug_stages:
+            print(f"[debug] run_core: created {len(tasks)} country tasks", flush=True)
+
+        results = []
+        if tasks:
+            results = await asyncio.gather(*tasks)
+        if args.debug_stages:
+            print("[debug] run_core: tasks completed", flush=True)
+
+        await browser.close()
+        if args.debug_stages:
+            print("[debug] run_core: browser closed", flush=True)
+
+    return any(results) or stop_flag.exists()
+
+
+def _empty_base_details() -> dict[str, str]:
+    return {
+        "hotel_name": "",
+        "hotel_rating": "",
+        "hotel_stars": "",
+        "hotel_type": "",
+        "main_image_url": "",
+        "target_description": "",
+    }
+
+
+async def process_country(
+    *,
+    browser,
+    semaphore: asyncio.Semaphore,
+    args: argparse.Namespace,
+    rows: list[dict[str, str]],
+    city_names: set[str],
+    links_by_country: dict[str, list[str]],
+    towns: list[str],
+    stop_flag: Path,
+    country_slug: str,
+    emit_row,
+) -> bool:
+    async with semaphore:
+        if stop_flag.exists():
+            return True
+
+        country_started_at = time.monotonic()
+
+        def debug_log(message: str) -> None:
+            if args.debug_stages:
+                elapsed = time.monotonic() - country_started_at
+                print(f"[debug] {country_slug} +{elapsed:.1f}s {message}", flush=True)
+
         context = await browser.new_context(
             locale="ru-RU",
             timezone_id="Europe/Moscow",
@@ -929,29 +1551,31 @@ async def run_core(
         details_page.set_default_timeout(args.timeout_ms)
 
         base_link_cache: dict[str, dict[str, str]] = {}
-
-        for country_slug in countries:
-            if stop_flag.exists():
-                stop_requested = True
-                break
-
+        stop_requested = False
+        try:
+            debug_log("worker started")
             base_links = links_by_country.get(country_slug, [])
             if args.base_link:
                 base_links = [args.base_link]
             if args.max_hotels > 0:
                 base_links = base_links[: args.max_hotels]
             if not base_links:
+                debug_log("discovering base links")
                 base_links = await discover_base_links_for_country(details_page, country_slug, max_links=args.max_hotels)
+                debug_log(f"discovered {len(base_links)} base links")
 
             if rows:
                 common_description = country_description_from_rows(rows, country_slug, city_names)
+                debug_log(f"country description from rows len={len(common_description)}")
             else:
                 desc_town = towns[0] if towns else DEFAULT_PARAMS.get("TOWNFROM", "moskva")
+                debug_log(f"fetching country description for town={desc_town}")
                 common_description = await fetch_country_common_description(
                     details_page,
                     town=desc_town,
                     country_slug=country_slug,
                 )
+                debug_log(f"country description fetched len={len(common_description)}")
             print(f"[info] country: {country_slug}, hotels={len(base_links)}")
 
             for base_link in base_links:
@@ -963,21 +1587,21 @@ async def run_core(
                     base_details = base_link_cache[base_link]
                 else:
                     try:
+                        debug_log(f"loading hotel page {base_link}")
                         await details_page.goto(base_link, wait_until="domcontentloaded")
                         try:
                             await details_page.wait_for_load_state("networkidle", timeout=8000)
                         except PlaywrightTimeoutError:
                             pass
                         base_details = await extract_base_hotel_details(details_page)
+                        debug_log(
+                            "hotel details loaded "
+                            f"name={bool(base_details.get('hotel_name'))} "
+                            f"target_len={len(base_details.get('target_description', ''))}"
+                        )
                     except Exception:
-                        base_details = {
-                            "hotel_name": "",
-                            "hotel_rating": "",
-                            "hotel_stars": "",
-                            "hotel_type": "",
-                            "main_image_url": "",
-                            "target_description": "",
-                        }
+                        debug_log(f"hotel details failed for {base_link}")
+                        base_details = _empty_base_details()
                     base_link_cache[base_link] = base_details
 
                 for town in towns:
@@ -985,6 +1609,7 @@ async def run_core(
                         stop_requested = True
                         break
 
+                    debug_log(f"finding first working date for town={town}")
                     first_beg = await find_first_working_date(
                         page,
                         base_link,
@@ -994,8 +1619,10 @@ async def run_core(
                         max_days=args.max_date_probe_days,
                     )
                     if not first_beg:
+                        debug_log(f"no working date for town={town}")
                         print(f"[warn] no working date: {base_link} / {town}")
                         continue
+                    debug_log(f"first working date={first_beg} for town={town}")
 
                     beg_date = datetime.strptime(first_beg, "%Y%m%d").date()
                     end_date = (beg_date + timedelta(days=7)).strftime("%Y%m%d")
@@ -1028,10 +1655,15 @@ async def run_core(
                                 req_url = build_url(base_link, params)
 
                                 try:
+                                    debug_log(
+                                        f"loading offers town={town} adult={adult} child={child} nights={nmin}-{nmax}"
+                                    )
                                     await page.goto(req_url, wait_until="domcontentloaded")
                                 except PlaywrightTimeoutError:
+                                    debug_log("offers page goto timeout")
                                     continue
                                 except Exception:
+                                    debug_log("offers page goto failed")
                                     continue
                                 try:
                                     await page.wait_for_load_state("networkidle", timeout=8000)
@@ -1040,10 +1672,12 @@ async def run_core(
 
                                 await click_show_more_until_end(page)
                                 offers = await extract_offer_cards(page)
+                                debug_log(
+                                    f"offers extracted count={len(offers)} town={town} adult={adult} child={child} nights={nmin}-{nmax}"
+                                )
 
-                                for o in offers:
-                                    booking_link = o.get("booking_link", "")
-                                    emit_row(
+                                for offer in offers:
+                                    await emit_row(
                                         asdict(
                                             ParsedTour(
                                                 country_slug=country_slug,
@@ -1063,18 +1697,20 @@ async def run_core(
                                                 main_image_url=base_details.get("main_image_url", ""),
                                                 common_description=common_description,
                                                 target_description=base_details.get("target_description", ""),
-                                                functions=o.get("functions", ""),
-                                                trip_dates=o.get("trip_dates", ""),
-                                                nights=o.get("nights", ""),
-                                                room=o.get("room", ""),
-                                                meal=o.get("meal", ""),
-                                                placement=o.get("placement", ""),
-                                                price=o.get("price", ""),
-                                                booking_link=booking_link,
-                                                raw_text=o.get("raw_text", ""),
+                                                functions=offer.get("functions", ""),
+                                                trip_dates=offer.get("trip_dates", ""),
+                                                nights=offer.get("nights", ""),
+                                                room=offer.get("room", ""),
+                                                meal=offer.get("meal", ""),
+                                                placement=offer.get("placement", ""),
+                                                price=offer.get("price", ""),
+                                                booking_link=offer.get("booking_link", ""),
+                                                raw_text=offer.get("raw_text", ""),
                                             )
                                         )
                                     )
+                                if offers:
+                                    debug_log(f"emitted {len(offers)} rows")
 
                                 print(
                                     f"[ok] {country_slug} {town} A{adult} C{child} N{nmin}-{nmax} "
@@ -1089,24 +1725,22 @@ async def run_core(
                         break
                 if stop_requested:
                     break
-            if stop_requested:
-                break
+        finally:
+            debug_log("closing worker context")
+            try:
+                await context.close()
+            except Exception:
+                debug_log("context already closed")
 
-        await context.close()
-        await browser.close()
-
-    return stop_requested
+        return stop_requested
 
 def build_args() -> argparse.Namespace:
-    import os
-    default_root = "/app" if os.getenv("DOCKER_ENV") else str(Path.cwd())
-    
     p = argparse.ArgumentParser(description="Generate available tours csv/json for all countries")
-    p.add_argument("--root", default=default_root)
+    p.add_argument("--root", default=r"D:\asoiu")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--timeout-ms", type=int, default=30000)
-    p.add_argument("--start-checkin-beg", default="20260313")
-    p.add_argument("--max-checkin-beg", default="20260320")
+    p.add_argument("--start-checkin-beg", default=DEFAULT_CHECKIN_BEG)
+    p.add_argument("--max-checkin-beg", default=DEFAULT_MAX_CHECKIN_BEG)
     p.add_argument("--max-date-probe-days", type=int, default=40)
     p.add_argument("--max-hotels", type=int, default=1, help="Limit hotels per country (0 = all)")
     p.add_argument("--max-towns", type=int, default=3, help="Limit towns (0 = all)")
@@ -1115,13 +1749,21 @@ def build_args() -> argparse.Namespace:
     p.add_argument("--max-countries", type=int, default=0, help="Limit countries (0 = all)")
     p.add_argument("--country-slug", default="", help="Parse only one country slug")
     p.add_argument("--country-slugs", default="", help="Comma-separated country slugs to parse")
-    p.add_argument("--out-json", default="/app/output/result.json")
-    p.add_argument("--out-csv", default="/app/output/result.csv")
+    p.add_argument("--out-json", default=r"D:\asoiu\anextour_available_tours_all_countries_example.json")
+    p.add_argument("--out-csv", default=r"D:\asoiu\anextour_available_tours_all_countries_example.csv")
     p.add_argument("--adult-max", type=int, default=10, help="Max adults (start is always 1)")
     p.add_argument("--child-max", type=int, default=10, help="Max children (start is always 0)")
     p.add_argument("--flush-interval-sec", type=int, default=120, help="Flush partial results every N seconds")
+    p.add_argument("--country-workers", type=int, default=20, help="How many countries to parse in parallel")
+    p.add_argument("--db-batch-size", type=int, default=200, help="Batch size for direct DB writes")
+    p.add_argument("--debug-stages", action="store_true", help="Print detailed stage-by-stage parser diagnostics")
+    p.add_argument("--write-db", dest="write_db", action="store_true", help="Write parsed tours directly to Django DB")
+    p.add_argument("--no-write-db", dest="write_db", action="store_false", help="Disable direct DB writes")
+    p.add_argument("--write-output", action="store_true", help="Additionally save parsed rows to CSV/JSON files")
+    p.add_argument("--reset-db", action="store_true", help="Truncate tours-related tables before direct DB write")
     p.add_argument("--stop-flag", default="", help="Path to stop flag file for safe stop")
     p.add_argument("--reset-output", action="store_true", help="Remove old out files before run")
+    p.set_defaults(write_db=True)
     return p.parse_args()
 
 def main() -> None:

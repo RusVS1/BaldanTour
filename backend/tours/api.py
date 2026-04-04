@@ -817,14 +817,14 @@ class FavoriteToursAPI(APIView):
     @extend_schema(
         parameters=[
             OpenApiParameter("user_id", OpenApiTypes.INT, required=True, location=OpenApiParameter.PATH),
-            OpenApiParameter("townfrom", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("country_slug", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_min", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_max", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("child", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
-            OpenApiParameter("adult", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("townfrom", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("country_slug", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_min", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_max", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("child", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("adult", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
             OpenApiParameter("rest_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_category", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
@@ -849,8 +849,8 @@ class FavoriteToursAPI(APIView):
 
         params = request.query_params
 
-        townfrom_in = (params.get("townfrom") or "").strip() or None
-        country_in = (params.get("country_slug") or params.get("country") or "").strip() or None
+        townfrom_in = (params.get("townfrom") or "").strip()
+        country_in = (params.get("country_slug") or params.get("country") or "").strip()
 
         departure_from = _parse_date(params.get("departure_from") or params.get("checkin_from"))
         departure_to = _parse_date(params.get("departure_to") or params.get("checkin_to"))
@@ -859,6 +859,30 @@ class FavoriteToursAPI(APIView):
         nights_max = _parse_int(params.get("nights_max"))
         child = _parse_int(params.get("child"))
         adult = _parse_int(params.get("adult"))
+
+        missing = []
+        if not townfrom_in:
+            missing.append("townfrom")
+        if not country_in:
+            missing.append("country_slug")
+        if departure_from is None:
+            missing.append("departure_from")
+        if departure_to is None:
+            missing.append("departure_to")
+        if nights_min is None:
+            missing.append("nights_min")
+        if nights_max is None:
+            missing.append("nights_max")
+        if child is None:
+            missing.append("child")
+        if adult is None:
+            missing.append("adult")
+
+        if missing:
+            return Response(
+                {"error": "missing_required_params", "missing": missing},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         rest_type = (params.get("rest_type") or "").strip() or None
         hotel_type = (params.get("hotel_type") or "").strip() or None
@@ -876,29 +900,20 @@ class FavoriteToursAPI(APIView):
         page_size = int(params.get("page_size") or 50)
         page_size = min(max(page_size, 1), 500)
 
-        townfrom_value = _value_from_label(townfrom_in or "", TOWNFROM_SLUG_TO_RU) if townfrom_in else None
-        country_value = _value_from_label(country_in or "", COUNTRY_SLUG_TO_RU) if country_in else None
-        townfrom_label = _label_from_value(townfrom_in or "", TOWNFROM_SLUG_TO_RU) if townfrom_in else None
-        country_label = _label_from_value(country_in or "", COUNTRY_SLUG_TO_RU) if country_in else None
+        townfrom_value = _value_from_label(townfrom_in, TOWNFROM_SLUG_TO_RU)
+        country_value = _value_from_label(country_in, COUNTRY_SLUG_TO_RU)
+        townfrom_label = _label_from_value(townfrom_in, TOWNFROM_SLUG_TO_RU)
+        country_label = _label_from_value(country_in, COUNTRY_SLUG_TO_RU)
 
         qs = Tour.objects.filter(favorites__user_id=user_id)
 
-        if townfrom_in:
-            qs = qs.filter(Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
-        if country_in:
-            qs = qs.filter(Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
-        if adult is not None:
-            qs = qs.filter(adult=adult)
-        if child is not None:
-            qs = qs.filter(child=child)
-        if nights_min is not None:
-            qs = qs.filter(nights__gte=nights_min)
-        if nights_max is not None:
-            qs = qs.filter(nights__lte=nights_max)
-        if departure_to is not None:
-            qs = qs.filter(checkin_beg__lte=departure_to)
-        if departure_from is not None:
-            qs = qs.filter(checkin_end__gte=departure_from)
+        qs = qs.filter(
+            (Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
+            & (Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
+        )
+        qs = qs.filter(adult=adult, child=child)
+        qs = qs.filter(nights__gte=nights_min, nights__lte=nights_max)
+        qs = qs.filter(checkin_beg__lte=departure_to, checkin_end__gte=departure_from)
 
         if rest_type:
             qs = qs.filter(rest_type__iexact=rest_type)
@@ -921,8 +936,8 @@ class FavoriteToursAPI(APIView):
             "country_slug": country_label,
             "townfrom_value": townfrom_value,
             "country_value": country_value,
-            "departure_from": departure_from.isoformat() if departure_from else None,
-            "departure_to": departure_to.isoformat() if departure_to else None,
+            "departure_from": departure_from.isoformat(),
+            "departure_to": departure_to.isoformat(),
             "nights_min": nights_min,
             "nights_max": nights_max,
             "child": child,
@@ -937,24 +952,6 @@ class FavoriteToursAPI(APIView):
         results = []
         for tour in tours:
             resolved_meta = dict(requested_meta)
-            if resolved_meta["townfrom"] is None:
-                resolved_meta["townfrom"] = (tour.townfrom_ru or "").strip() or _label_from_value(tour.townfrom or "", TOWNFROM_SLUG_TO_RU)
-                resolved_meta["townfrom_value"] = (tour.townfrom or "").strip() or None
-            if resolved_meta["country_slug"] is None:
-                resolved_meta["country_slug"] = (tour.country_ru or "").strip() or _label_from_value(tour.country_slug or "", COUNTRY_SLUG_TO_RU)
-                resolved_meta["country_value"] = (tour.country_slug or "").strip() or None
-            if resolved_meta["departure_from"] is None and tour.checkin_beg:
-                resolved_meta["departure_from"] = tour.checkin_beg.isoformat()
-            if resolved_meta["departure_to"] is None and tour.checkin_end:
-                resolved_meta["departure_to"] = tour.checkin_end.isoformat()
-            if resolved_meta["nights_min"] is None and tour.nights is not None:
-                resolved_meta["nights_min"] = tour.nights
-            if resolved_meta["nights_max"] is None and tour.nights is not None:
-                resolved_meta["nights_max"] = tour.nights
-            if resolved_meta["child"] is None:
-                resolved_meta["child"] = tour.child
-            if resolved_meta["adult"] is None:
-                resolved_meta["adult"] = tour.adult
             if resolved_meta["rest_type"] is None:
                 resolved_meta["rest_type"] = tour.rest_type or None
             if resolved_meta["hotel_type"] is None:
@@ -1235,6 +1232,12 @@ class AISearchAPI(APIView):
         embedding_model = ""
         if embedder.provider == "openai":
             embedding_model = (os.environ.get("OPENAI_EMBEDDING_MODEL") or "text-embedding-3-small").strip()
+        elif embedder.provider in ("st", "sentence_transformers", "sentence-transformers"):
+            embedding_model = (
+                os.environ.get("ST_EMBEDDING_MODEL")
+                or os.environ.get("HF_EMBEDDING_MODEL")
+                or "ibm-granite/granite-embedding-278m-multilingual"
+            ).strip()
 
         return Response(
             {
