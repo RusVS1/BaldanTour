@@ -80,22 +80,40 @@ services:
     environment:
       - TZ=Europe/Moscow
     labels:
+      ofelia.job-run.parser-once.schedule: "@once"
+      ofelia.job-run.parser-once.image: "parser-app:latest"
+      ofelia.job-run.parser-once.command: >
+        python /parser/main.py
+        --headless
+        --reset-output
+        --root /parser
+        --out-csv /parser/output/result.csv
+        --out-json /parser/output/result.json
+        --stop-flag /parser/output/STOP.flag
+        --max-hotels 0
+        --max-towns 0
+        --max-countries 0
+        --country-workers 1
+      ofelia.job-run.parser-once.autoRemove: "true"
+      ofelia.job-run.parser-once.no-overlap: "true"
+    
       ofelia.job-run.parser.schedule: "0 0 22 * * 0"
       ofelia.job-run.parser.image: "parser-app:latest"
       ofelia.job-run.parser.command: >
-        python /app/main.py
+        python /parser/main.py
         --headless
         --reset-output
-        --root /app
-        --out-csv /app/output/result.csv
-        --out-json /app/output/result.json
-        --stop-flag /app/output/STOP.flag
+        --root /parser
+        --out-csv /parser/output/result.csv
+        --out-json /parser/output/result.json
+        --stop-flag /parser/output/STOP.flag
         --max-hotels 0
         --max-towns 0
         --max-countries 0
         --country-workers 1
       ofelia.job-run.parser.autoRemove: "true"
       ofelia.job-run.parser.no-overlap: "true"
+    
       ofelia.job-run.parser.runtime-flags: >
         --shm-size=2gb
         --init
@@ -107,6 +125,7 @@ services:
         --memory-swap="4g"
         --pids-limit=100
         --oom-kill-disable
+    
       ofelia.job-run.parser.notify.success: "true"
       ofelia.job-run.parser.notify.error: "true"
 
