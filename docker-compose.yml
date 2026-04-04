@@ -10,8 +10,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
-      - ./db/restore.sh:/docker-entrypoint-initdb.d/01-restore.sh:ro
-      - ./db/data.dump:/docker-entrypoint-initdb.d/data.dump:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 2s
@@ -31,6 +29,8 @@ services:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       DB_WAIT_SECONDS: 60
+      PRELOAD_EMBEDDING_MODEL: 1
+      HF_HOME: /models/huggingface
     ports:
       - "8000:8000"
     depends_on:
@@ -38,6 +38,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app 
+      - huggingface_cache:/models/huggingface
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/fx/rub/"]
       interval: 5s
@@ -64,11 +65,36 @@ services:
         POSTGRES_USER: ${POSTGRES_USER}
         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
         POSTGRES_HOST: host.docker.internal
-        POSTGRES_PORT: 5433
+        POSTGRES_PORT: ${POSTGRES_PORT}
     image: parser-app:latest
     command: echo "Образ parser-app:latest собран"
     profiles:
       - build
+
+  parser-bootstrap:
+    image: parser-app:latest
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    command: >
+      sh -lc "sleep 600 &&
+      python -u -m parser.main
+      --headless
+      --reset-output
+      --root /app
+      --out-csv /app/output/result.csv
+      --out-json /app/output/result.json
+      --stop-flag /app/output/STOP.flag
+      --max-hotels 0
+      --max-towns 0
+      --max-countries 0
+      --country-workers 1"
 
   scheduler:
     image: mcuadros/ofelia:latest
@@ -80,33 +106,16 @@ services:
     environment:
       - TZ=Europe/Moscow
     labels:
-      ofelia.job-run.parser-once.schedule: "@once"
-      ofelia.job-run.parser-once.image: "parser-app:latest"
-      ofelia.job-run.parser-once.command: >
-        python /parser/main.py
-        --headless
-        --reset-output
-        --root /parser
-        --out-csv /parser/output/result.csv
-        --out-json /parser/output/result.json
-        --stop-flag /parser/output/STOP.flag
-        --max-hotels 0
-        --max-towns 0
-        --max-countries 0
-        --country-workers 1
-      ofelia.job-run.parser-once.autoRemove: "true"
-      ofelia.job-run.parser-once.no-overlap: "true"
-    
       ofelia.job-run.parser.schedule: "0 0 22 * * 0"
       ofelia.job-run.parser.image: "parser-app:latest"
       ofelia.job-run.parser.command: >
-        python /parser/main.py
+        python -u -m parser.main
         --headless
         --reset-output
-        --root /parser
-        --out-csv /parser/output/result.csv
-        --out-json /parser/output/result.json
-        --stop-flag /parser/output/STOP.flag
+        --root /app
+        --out-csv /app/output/result.csv
+        --out-json /app/output/result.json
+        --stop-flag /app/output/STOP.flag
         --max-hotels 0
         --max-towns 0
         --max-countries 0
@@ -119,7 +128,7 @@ services:
         --init
         --env TZ=Europe/Moscow
         --env POSTGRES_HOST=host.docker.internal
-        --env POSTGRES_PORT=5433
+        --env POSTGRES_PORT=${POSTGRES_PORT}
         --cpus="2"
         --memory="4g"
         --memory-swap="4g"
@@ -131,3 +140,4 @@ services:
 
 volumes:
   pgdata:
+  huggingface_cache:
