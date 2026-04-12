@@ -409,6 +409,7 @@ const setHotToursDate = () => {
     from: formatDate(start),
     to: formatDate(end),
   };
+  form.nights = form.nights ?? 7;
 };
 
 watch(
@@ -426,7 +427,7 @@ const isFormValid = computed(
     !!from.value && !!to.value && !!form.date.from && !!form.nights && form.tourists.adults >= 1,
 );
 
-const isAiFormValid = computed(() => aiQuery.value.trim().length >= 10);
+const isAiFormValid = computed(() => aiQuery.value.trim().length >= 1 && aiQuery.value.trim().length <= 500);
 
 function handleSearch() {
   touched.from = touched.to = touched.date = touched.nights = touched.tourists = true;
