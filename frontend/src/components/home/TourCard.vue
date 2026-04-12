@@ -44,6 +44,7 @@
 
       <div class="q-mt-lg row items-center q-gutter-md justify-end">
         <q-icon
+          v-if="auth.user"
           :name="isFavorite ? 'favorite' : 'favorite_border'"
           :color="isFavorite ? '' : 'primary'"
           :style="isFavorite ? { color: '#dd5555' } : {}"
@@ -69,6 +70,9 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import type { TourBase } from 'src/api/filters';
+import { useAuthStore } from 'src/stores/auth';
+
+const auth = useAuthStore();
 
 const props = defineProps<{
   tour: TourBase;
@@ -90,9 +94,8 @@ const formatDate = (value?: string | null) => {
 
 const tourDateLabel = computed(() => {
   const dates = props.tour.trip_dates?.trim();
-  const nights = props.tour.nights ? `${props.tour.nights} ноч.` : '';
   if (dates) {
-    return [dates, nights].filter(Boolean).join(', ');
+    return dates
   }
 
   const from = formatDate(props.tour.departure_from);

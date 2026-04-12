@@ -1,13 +1,5 @@
 <template>
   <q-card class="q-pa-lg">
-    <q-btn
-      label="Сбросить фильтры"
-      color="primary"
-      outline
-      no-caps
-      class="full-width q-mb-md"
-      @click="resetFilters"
-    />
     <div class="custom-font-size text-weight-medium text-primary text-center q-mb-md">Фильтры</div>
 
     <div class="q-mb-sm">
@@ -39,28 +31,26 @@
           <q-input
             v-model.number="filters.priceFrom"
             type="number"
-            min="0"
+            @update:model-value="val => filters.priceFrom = normalizePrice(val)"
             outlined
             dense
             placeholder="от"
             input-class="custom-font-size text-primary"
             class="custom-arrow-blue"
             @blur="emitFilters"
-            @update:model-value="sanitizePrices"
           />
         </div>
         <div class="col">
           <q-input
             v-model.number="filters.priceTo"
             type="number"
-            min="0"
+            @update:model-value="val => filters.priceTo = normalizePrice(val)"
             outlined
             dense
             placeholder="до"
             input-class="custom-font-size text-primary"
             class="custom-arrow-blue"
             @blur="emitFilters"
-            @update:model-value="sanitizePrices"
           />
         </div>
       </div>
@@ -153,6 +143,16 @@
         @update:model-value="emitFilters"
       />
     </div>
+    <div class="row justify-center q-mt-md">
+      <q-btn
+        label="Сбросить фильтры"
+        size="lg"
+        color="primary"
+        outline
+        no-caps
+        @click="resetFilters"
+      />
+    </div>
   </q-card>
 </template>
 
@@ -204,6 +204,16 @@ const sortOptions: FilterOption[] = [
   { label: 'По типу питания', value: 'meal' },
 ];
 
+function normalizePrice(val: string | number | null | undefined): number | null {
+  if (val === null || val === undefined || val === '') return null;
+
+  const num = Number(val);
+
+  if (Number.isNaN(num)) return null;
+
+  return num < 0 ? null : num;
+}
+
 const emit = defineEmits<{
   (e: 'filter-change', filters: Partial<Filters>): void;
 }>();
@@ -225,21 +235,6 @@ function emitFilters() {
     emit('filter-change', activeFilters);
   }, 300);
 }
-
-function sanitizePrices() {
-  if (typeof filters.value.priceFrom === 'number' && filters.value.priceFrom < 0) {
-    filters.value.priceFrom = 0;
-  }
-  if (typeof filters.value.priceTo === 'number' && filters.value.priceTo < 0) {
-    filters.value.priceTo = 0;
-  }
-}
-
-watch(
-  () => filters.value,
-  () => emitFilters(),
-  { deep: true },
-);
 
 onMounted(async () => {
   try {
@@ -288,7 +283,20 @@ function resetFilters() {
     food: null,
     sort: null,
   };
+
+  emitFilters();
 }
+
+watch(
+  () => [filters.value.priceFrom, filters.value.priceTo],
+  ([from, to]) => {
+    if (typeof from === 'number' && typeof to === 'number') {
+      if (to < from) {
+        filters.value.priceTo = from + 1;
+      }
+    }
+  }
+);
 
 defineExpose({ resetFilters });
 </script>
