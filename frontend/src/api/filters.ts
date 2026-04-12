@@ -2,25 +2,31 @@ import { apiFetch } from './api';
 
 export type TourBase = {
   id: number;
+  base_link?: string | null;
   hotel_name: string;
   hotel_rating: string | null;
+  trip_dates?: string;
+  departure_from?: string | null;
+  departure_to?: string | null;
+  nights?: number | null;
   price_per_person: number;
   answer_description: string;
   main_image_url: string | null;
-  buy_link: string;
+  booking_url?: string | null;
+  buy_link?: string | null;
   meta: {
     townfrom: string;
     country_slug: string;
     rest_type: string;
     hotel_type: string;
-    hotel_category: string | null;
+    hotel_category: string | number | null;
     meal: string | null;
   };
 };
 
 export type Tour = TourBase & {
   hotel_slug: string;
-  hotel_stars: number | null;
+  hotel_stars?: number | null;
   hotel_type: string | null;
   meal: string | null;
   common_description: string;
@@ -81,7 +87,7 @@ export const aiSearch = (query: string) => {
 
 export const getFilterOptions = {
   country: () => apiFetch<{ values: FilterOption[] }>('/api/filters/country/'),
-  hotelCategory: () => apiFetch<{ values: number[] }>('/api/filters/hotel-category/'),
+  hotelCategory: () => apiFetch<{ values: FilterOption[] }>('/api/filters/hotel-category/'),
   hotelType: () => apiFetch<{ values: string[] }>('/api/filters/hotel-type/'),
   meal: () => apiFetch<{ values: string[] }>('/api/filters/meal/'),
   restType: () => apiFetch<{ values: string[] }>('/api/filters/rest-type/'),

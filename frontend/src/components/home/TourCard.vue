@@ -27,6 +27,10 @@
       >
         {{ tour.meta.meal }}
       </div>
+
+      <div v-if="tourDateLabel" class="text-primary custom-opacity date-text">
+        Даты тура: {{ tourDateLabel }}
+      </div>
     </div>
 
     <div class="col text-center description-col">
@@ -40,6 +44,7 @@
 
       <div class="q-mt-lg row items-center q-gutter-md justify-end">
         <q-icon
+          v-if="auth.user"
           :name="isFavorite ? 'favorite' : 'favorite_border'"
           :color="isFavorite ? '' : 'primary'"
           :style="isFavorite ? { color: '#dd5555' } : {}"
@@ -53,6 +58,7 @@
           rounded
           unelevated
           no-caps
+          :disable="!tourLink"
           class="text-white go-btn"
           @click="openTourLink"
         />
@@ -64,6 +70,9 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import type { TourBase } from 'src/api/filters';
+import { useAuthStore } from 'src/stores/auth';
+
+const auth = useAuthStore();
 
 const props = defineProps<{
   tour: TourBase;
@@ -75,6 +84,27 @@ const emit = defineEmits<{
 }>();
 
 const isFavorite = ref(props.isFavorite ?? false);
+
+const formatDate = (value?: string | null) => {
+  if (!value) return '';
+  const [year, month, day] = value.split('-');
+  if (!year || !month || !day) return value;
+  return `${day}.${month}.${year}`;
+};
+
+const tourDateLabel = computed(() => {
+  const dates = props.tour.trip_dates?.trim();
+  if (dates) {
+    return dates
+  }
+
+  const from = formatDate(props.tour.departure_from);
+  const to = formatDate(props.tour.departure_to);
+  const range = from && to ? `${from} - ${to}` : from || to;
+  return [range, nights].filter(Boolean).join(', ');
+});
+
+const tourLink = computed(() => props.tour.booking_url || props.tour.buy_link || '');
 
 watch(
   () => props.isFavorite,
@@ -89,8 +119,9 @@ function toggleFavorite() {
 }
 
 function openTourLink() {
-  if (props.tour.buy_link) {
-    window.open(props.tour.buy_link, '_blank', 'noopener,noreferrer');
+  const link = tourLink.value;
+  if (link) {
+    window.open(link, '_blank', 'noopener,noreferrer');
   }
 }
 
@@ -110,6 +141,9 @@ const imageSrc = computed(() => {
 .food-text,
 .description-text {
   font-size: 20px;
+}
+.date-text {
+  font-size: 18px;
 }
 .price-text {
   color: #c50000;
@@ -141,6 +175,9 @@ const imageSrc = computed(() => {
   .food-text,
   .description-text {
     font-size: 16px;
+  }
+  .date-text {
+    font-size: 15px;
   }
   .price-text {
     font-size: 20px;

@@ -45,6 +45,9 @@ docker-compose up -d --build
 - Swagger-документация API:  
   http://localhost/api/docs
 
+- Хостинг:  
+  http://84.244.31.171:8181
+
 # Документация
 
 - Макеты системы:  

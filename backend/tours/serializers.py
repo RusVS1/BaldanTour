@@ -26,7 +26,6 @@ class TourSerializer(serializers.ModelSerializer):
             "night_max",
             "checkin_beg",
             "checkin_end",
-            "description",
             "trip_dates",
             "nights",
             "room",
