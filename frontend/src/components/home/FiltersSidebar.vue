@@ -1,5 +1,13 @@
 <template>
   <q-card class="q-pa-lg">
+    <q-btn
+      label="Сбросить фильтры"
+      color="primary"
+      outline
+      no-caps
+      class="full-width q-mb-md"
+      @click="resetFilters"
+    />
     <div class="custom-font-size text-weight-medium text-primary text-center q-mb-md">Фильтры</div>
 
     <div class="q-mb-sm">
@@ -31,24 +39,28 @@
           <q-input
             v-model.number="filters.priceFrom"
             type="number"
+            min="0"
             outlined
             dense
             placeholder="от"
             input-class="custom-font-size text-primary"
             class="custom-arrow-blue"
             @blur="emitFilters"
+            @update:model-value="sanitizePrices"
           />
         </div>
         <div class="col">
           <q-input
             v-model.number="filters.priceTo"
             type="number"
+            min="0"
             outlined
             dense
             placeholder="до"
             input-class="custom-font-size text-primary"
             class="custom-arrow-blue"
             @blur="emitFilters"
+            @update:model-value="sanitizePrices"
           />
         </div>
       </div>
@@ -214,6 +226,15 @@ function emitFilters() {
   }, 300);
 }
 
+function sanitizePrices() {
+  if (typeof filters.value.priceFrom === 'number' && filters.value.priceFrom < 0) {
+    filters.value.priceFrom = 0;
+  }
+  if (typeof filters.value.priceTo === 'number' && filters.value.priceTo < 0) {
+    filters.value.priceTo = 0;
+  }
+}
+
 watch(
   () => filters.value,
   () => emitFilters(),
@@ -250,9 +271,7 @@ onMounted(async () => {
 
     options.value.restType = formatOptions(restType.values);
     options.value.hotelType = formatOptions(hotelType.values);
-    options.value.hotelCategory = formatOptions(
-      hotelCategory.values.map((v) => ({ label: String(v), value: v })),
-    );
+    options.value.hotelCategory = formatOptions(hotelCategory.values);
     options.value.meal = formatOptions(meal.values);
   } catch (e) {
     console.error('Ошибка при загрузке опций', e);

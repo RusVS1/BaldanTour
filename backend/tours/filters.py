@@ -30,7 +30,6 @@ class TourFilter(django_filters.FilterSet):
 
     trip_dates = django_filters.CharFilter(field_name="trip_dates", lookup_expr="icontains")
     raw_text = django_filters.CharFilter(field_name="raw_text", lookup_expr="icontains")
-    description = django_filters.CharFilter(field_name="description", lookup_expr="icontains")
 
     price_min = django_filters.NumberFilter(field_name="price_value", lookup_expr="gte")
     price_max = django_filters.NumberFilter(field_name="price_value", lookup_expr="lte")
@@ -70,7 +69,6 @@ class TourFilter(django_filters.FilterSet):
             "night_max",
             "checkin_beg",
             "checkin_end",
-            "description",
             "trip_dates",
             "nights",
             "room",
@@ -106,7 +104,9 @@ class TourFilter(django_filters.FilterSet):
             | Q(placement__icontains=value)
             | Q(meal__icontains=value)
             | Q(raw_text__icontains=value)
-            | Q(description__icontains=value)
+            | Q(common_description__content__icontains=value)
+            | Q(target_description__content__icontains=value)
+            | Q(answer_description__content__icontains=value)
         )
 
     def filter_rest_type(self, queryset, name, value):
@@ -114,9 +114,11 @@ class TourFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return queryset.filter(
-            Q(raw_text__icontains=value)
-            | Q(description__icontains=value)
-            | Q(trip_dates__icontains=value)
+            Q(rest_type__iexact=value)
+            | Q(raw_text__icontains=value)
+            | Q(common_description__content__icontains=value)
+            | Q(target_description__content__icontains=value)
+            | Q(answer_description__content__icontains=value)
         )
 
     def filter_hotel_type(self, queryset, name, value):
@@ -124,7 +126,8 @@ class TourFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return queryset.filter(
-            Q(placement__icontains=value)
+            Q(hotel_type__iexact=value)
+            | Q(placement__icontains=value)
             | Q(room__icontains=value)
             | Q(raw_text__icontains=value)
         )

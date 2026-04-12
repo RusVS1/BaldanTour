@@ -48,8 +48,13 @@ def get_embedder() -> Embedder:
         # Prefer a local open-source multilingual model if available.
         if _can_use_sentence_transformers():
             provider = "sentence_transformers"
+        elif api_key:
+            provider = "openai"
         else:
-            provider = "openai" if api_key else "dummy"
+            raise RuntimeError(
+                "No real embeddings provider is available. Install sentence-transformers, "
+                "set OPENAI_API_KEY, or explicitly set EMBEDDINGS_PROVIDER=dummy for local tests."
+            )
 
     if provider in ("st", "sentence_transformers", "sentence-transformers"):
         # Use the real model dimension to avoid silent mismatches.
