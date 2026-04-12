@@ -993,7 +993,7 @@ class FavoriteEnvelopeSerializer(serializers.Serializer):
 
 
 class FavoriteToursAPI(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = FavoriteEnvelopeSerializer
 
     def _check_access(self, request, user_id: int) -> None:
@@ -1002,14 +1002,14 @@ class FavoriteToursAPI(APIView):
     @extend_schema(
         parameters=[
             OpenApiParameter("user_id", OpenApiTypes.INT, required=True, location=OpenApiParameter.PATH),
-            OpenApiParameter("townfrom", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("country_slug", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_min", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_max", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("child", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("adult", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("townfrom", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("country_slug", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_min", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_max", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("child", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("adult", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("rest_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_category", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
@@ -1027,11 +1027,6 @@ class FavoriteToursAPI(APIView):
         responses=FavoriteEnvelopeSerializer,
     )
     def get(self, request, user_id: int):
-        try:
-            self._check_access(request, user_id)
-        except serializers.ValidationError:
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
         params = request.query_params
 
         townfrom_in = (params.get("townfrom") or "").strip()
@@ -1045,29 +1040,18 @@ class FavoriteToursAPI(APIView):
         child = _parse_int(params.get("child"))
         adult = _parse_int(params.get("adult"))
 
-        missing = []
-        if not townfrom_in:
-            missing.append("townfrom")
-        if not country_in:
-            missing.append("country_slug")
-        if departure_from is None:
-            missing.append("departure_from")
-        if departure_to is None:
-            missing.append("departure_to")
-        if nights_min is None:
-            missing.append("nights_min")
-        if nights_max is None:
-            missing.append("nights_max")
-        if child is None:
-            missing.append("child")
-        if adult is None:
-            missing.append("adult")
-
-        if missing:
-            return Response(
-                {"error": "missing_required_params", "missing": missing},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if (params.get("departure_from") or params.get("checkin_from")) and departure_from is None:
+            return _bad_request("invalid_date", "departure_from")
+        if (params.get("departure_to") or params.get("checkin_to")) and departure_to is None:
+            return _bad_request("invalid_date", "departure_to")
+        if params.get("nights_min") and nights_min is None:
+            return _bad_request("invalid_integer", "nights_min")
+        if params.get("nights_max") and nights_max is None:
+            return _bad_request("invalid_integer", "nights_max")
+        if params.get("child") and child is None:
+            return _bad_request("invalid_integer", "child")
+        if params.get("adult") and adult is None:
+            return _bad_request("invalid_integer", "adult")
 
         rest_type = (params.get("rest_type") or "").strip() or None
         hotel_type = (params.get("hotel_type") or "").strip() or None
@@ -1105,13 +1089,22 @@ class FavoriteToursAPI(APIView):
 
         qs = Tour.objects.filter(favorites__user_id=user_id)
 
-        qs = qs.filter(
-            (Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
-            & (Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
-        )
-        qs = qs.filter(adult=adult, child=child)
-        qs = qs.filter(nights__gte=nights_min, nights__lte=nights_max)
-        qs = qs.filter(checkin_beg__lte=departure_to, checkin_end__gte=departure_from)
+        if townfrom_in:
+            qs = qs.filter(Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
+        if country_in:
+            qs = qs.filter(Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
+        if adult is not None:
+            qs = qs.filter(adult=adult)
+        if child is not None:
+            qs = qs.filter(child=child)
+        if nights_min is not None:
+            qs = qs.filter(nights__gte=nights_min)
+        if nights_max is not None:
+            qs = qs.filter(nights__lte=nights_max)
+        if departure_from is not None:
+            qs = qs.filter(checkin_end__gte=departure_from)
+        if departure_to is not None:
+            qs = qs.filter(checkin_beg__lte=departure_to)
 
         if rest_type:
             qs = qs.filter(rest_type__iexact=rest_type)
@@ -1122,9 +1115,9 @@ class FavoriteToursAPI(APIView):
         if meal:
             qs = qs.filter(meal__iexact=meal)
         if price_from is not None:
-            qs = qs.filter(price_value__gte=price_from * max(adult, 1))
+            qs = qs.filter(price_value__gte=price_from * max(adult or 1, 1))
         if price_to is not None:
-            qs = qs.filter(price_value__lte=price_to * max(adult, 1))
+            qs = qs.filter(price_value__lte=price_to * max(adult or 1, 1))
 
         qs = qs.order_by(*TourSearchAPI.SORT_MAP[sort])
         qs = qs.select_related("common_description", "target_description", "answer_description", "main_image")
@@ -1134,12 +1127,12 @@ class FavoriteToursAPI(APIView):
         tours = list(qs[offset : offset + page_size])
 
         requested_meta = {
-            "townfrom": townfrom_label,
-            "country_slug": country_label,
-            "townfrom_value": townfrom_value,
-            "country_value": country_value,
-            "departure_from": departure_from.isoformat(),
-            "departure_to": departure_to.isoformat(),
+            "townfrom": townfrom_label if townfrom_in else None,
+            "country_slug": country_label if country_in else None,
+            "townfrom_value": townfrom_value if townfrom_in else None,
+            "country_value": country_value if country_in else None,
+            "departure_from": departure_from.isoformat() if departure_from else None,
+            "departure_to": departure_to.isoformat() if departure_to else None,
             "nights_min": nights_min,
             "nights_max": nights_max,
             "child": child,
