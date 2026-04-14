@@ -42,7 +42,7 @@
     <div class="col-auto q-pr-md text-right actions-col">
       <div class="q-mb-md price-text">{{ tour.price_per_person }} ₽ за человека</div>
 
-      <div class="q-mt-lg row items-center q-gutter-md justify-end">
+      <div class="q-mt-xl row items-center q-gutter-md justify-end">
         <q-icon
           v-if="auth.user"
           :name="isFavorite ? 'favorite' : 'favorite_border'"
@@ -101,7 +101,7 @@ const tourDateLabel = computed(() => {
   const from = formatDate(props.tour.departure_from);
   const to = formatDate(props.tour.departure_to);
   const range = from && to ? `${from} - ${to}` : from || to;
-  return [range].filter(Boolean).join(', ');
+  return range;
 });
 
 const tourLink = computed(() => props.tour.booking_url || props.tour.buy_link || '');
