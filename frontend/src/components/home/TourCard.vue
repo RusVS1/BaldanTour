@@ -101,7 +101,7 @@ const tourDateLabel = computed(() => {
   const from = formatDate(props.tour.departure_from);
   const to = formatDate(props.tour.departure_to);
   const range = from && to ? `${from} - ${to}` : from || to;
-  return [range, nights].filter(Boolean).join(', ');
+  return [range].filter(Boolean).join(', ');
 });
 
 const tourLink = computed(() => props.tour.booking_url || props.tour.buy_link || '');
