@@ -28,6 +28,13 @@ while time.time() < deadline:
 raise SystemExit(f"DB is not ready after {timeout}s: {last_error}")
 PY
 
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -eq 1 ]; then
+    exec bash -lc "$1"
+  fi
+  exec "$@"
+fi
+
 exec python -u -m parser.main \
   --headless \
   --root /app \

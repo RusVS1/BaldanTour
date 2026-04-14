@@ -37,4 +37,39 @@ PY
 
 python manage.py migrate --noinput
 
+(python - <<'PY'
+import os
+
+provider = (os.environ.get("EMBEDDINGS_PROVIDER") or "").strip().lower()
+should_warm = (os.environ.get("PRELOAD_EMBEDDING_MODEL") or "1").strip().lower() not in {"0", "false", "no"}
+
+if not should_warm:
+    print("Embedding preload skipped by PRELOAD_EMBEDDING_MODEL.")
+    raise SystemExit(0)
+
+if provider == "dummy":
+    print("Embedding preload skipped for dummy provider.")
+    raise SystemExit(0)
+
+try:
+    from tours.embeddings import get_embedder
+
+    embedder = get_embedder()
+    if embedder.provider in {"st", "sentence_transformers", "sentence-transformers"}:
+        embedder.embed_texts(["query: warmup"])
+        print(f"Embedding model preloaded: provider={embedder.provider} dim={embedder.dim}")
+    else:
+        print(f"Embedding preload skipped for provider={embedder.provider}")
+
+    from tours.reranker import get_reranker
+
+    reranker = get_reranker()
+    if reranker is not None:
+        reranker.rerank("warmup", ["warmup tour"], lambda value: value)
+        print(f"AI reranker preloaded: provider={reranker.provider} model={reranker.model_name}")
+except Exception as exc:
+    print(f"WARNING: AI model preload failed: {exc}")
+PY
+) &
+
 exec python manage.py runserver 0.0.0.0:8000

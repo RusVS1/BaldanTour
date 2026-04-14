@@ -2,18 +2,24 @@ import { apiFetch } from './api';
 
 export type FavoriteTour = {
   id: number;
+  base_link?: string | null;
   hotel_name: string;
   hotel_rating: string | null;
+  trip_dates?: string;
+  departure_from?: string | null;
+  departure_to?: string | null;
+  nights?: number | null;
   price_per_person: number;
   answer_description: string;
   main_image_url: string | null;
+  booking_url?: string | null;
   buy_link: string;
   meta: {
     townfrom: string;
     country_slug: string;
     rest_type: string;
     hotel_type: string;
-    hotel_category: string | null;
+    hotel_category: string | number | null;
     meal: string | null;
   };
 };
@@ -44,7 +50,7 @@ export const getFavoriteFilters = {
   country: (userId: number) =>
     apiFetch<{ values: FilterOption[] }>(`/api/favorites/${userId}/filters/country/`),
   hotelCategory: (userId: number) =>
-    apiFetch<{ values: number[] }>(`/api/favorites/${userId}/filters/hotel-category/`),
+    apiFetch<{ values: FilterOption[] }>(`/api/favorites/${userId}/filters/hotel-category/`),
   hotelType: (userId: number) =>
     apiFetch<{ values: string[] }>(`/api/favorites/${userId}/filters/hotel-type/`),
   meal: (userId: number) =>

@@ -9,6 +9,8 @@
         <div class="row items-center">
           <div class="text-primary" style="font-size: 32px">Избранное</div>
           <q-icon name="favorite" size="40px" class="q-ml-sm" style="color: #dd5555" />
+          <q-space />
+          <q-btn to="/" size="lg" color="primary" outline no-caps label="Вернуться к поиску" />
         </div>
       </q-card>
     </div>

@@ -48,8 +48,13 @@ def get_embedder() -> Embedder:
         # Prefer a local open-source multilingual model if available.
         if _can_use_sentence_transformers():
             provider = "sentence_transformers"
+        elif api_key:
+            provider = "openai"
         else:
-            provider = "openai" if api_key else "dummy"
+            raise RuntimeError(
+                "No real embeddings provider is available. Install sentence-transformers, "
+                "set OPENAI_API_KEY, or explicitly set EMBEDDINGS_PROVIDER=dummy for local tests."
+            )
 
     if provider in ("st", "sentence_transformers", "sentence-transformers"):
         # Use the real model dimension to avoid silent mismatches.
@@ -133,11 +138,11 @@ def _get_st_model():
             "or set EMBEDDINGS_PROVIDER=dummy/openai."
         ) from e
 
-    # Open multilingual text embedding model with 768-dim output.
+    # Open multilingual text embedding model with 768-dim output and Russian support.
     model_name = (
         os.environ.get("ST_EMBEDDING_MODEL")
         or os.environ.get("HF_EMBEDDING_MODEL")
-        or "ibm-granite/granite-embedding-278m-multilingual"
+        or "intfloat/multilingual-e5-base"
     ).strip()
 
     _ST_MODEL = SentenceTransformer(model_name)
@@ -156,7 +161,19 @@ def _st_model_dim() -> int:
 
 def _st_embed(texts: list[str], *, expected_dim: int) -> list[list[float]]:
     model = _get_st_model()
-    vectors = model.encode(texts, normalize_embeddings=True)
+    model_name = str(
+        os.environ.get("ST_EMBEDDING_MODEL")
+        or os.environ.get("HF_EMBEDDING_MODEL")
+        or "intfloat/multilingual-e5-base"
+    ).strip().lower()
+
+    prepared = texts
+    # E5 models are trained with task prefixes; for our similarity/search usage
+    # we use the recommended "query: " prefix consistently.
+    if "multilingual-e5" in model_name or model_name.endswith("/e5-base"):
+        prepared = [f"query: {text or ''}" for text in texts]
+
+    vectors = model.encode(prepared, normalize_embeddings=True)
 
     out: list[list[float]] = []
     for v in vectors:
