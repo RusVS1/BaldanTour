@@ -197,6 +197,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:9000",
     "http://127.0.0.1:9000",
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://84.244.31.171:8181"
 ]
 
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0") == "1"
