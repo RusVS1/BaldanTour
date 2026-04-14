@@ -1,13 +1,29 @@
 <template>
   <div class="column full-height">
-    <q-card v-if="props.tours.length === 0" class="border-radius-md full-height">
-      <q-card-section class="text-center full-height column justify-center">
-        <div>
-          <q-icon name="search_off" size="48px" color="primary" />
+
+    <q-card
+      v-if="props.loading"
+      class="border-radius-md full-height flex flex-center"
+    >
+      <q-card-section class="column items-center justify-center">
+        <q-spinner size="50px" color="primary" />
+        <div class="text-primary q-mt-md text-center" style="font-size: 16px">
+          {{ props.isAi ? 'ИИ подбирает лучшие туры...' : 'Идёт поиск туров...' }}
         </div>
+      </q-card-section>
+    </q-card>
+
+    <q-card
+      v-else-if="props.tours.length === 0"
+      class="border-radius-md full-height"
+    >
+      <q-card-section class="text-center full-height column justify-center items-center">
+        <q-icon name="search_off" size="48px" color="primary"/>
+
         <div class="custom-font-size text-primary q-mb-xs">
           {{ emptyStateTitle }}
         </div>
+
         <div class="text-primary custom-opacity" style="font-size: 16px">
           {{ emptyStateSubtitle }}
         </div>
@@ -24,6 +40,7 @@
         @toggle-favorite="favorites.toggleFavorite"
       />
     </template>
+
   </div>
 </template>
 
@@ -37,6 +54,7 @@ const props = defineProps<{
   tours: Tour[];
   loading?: boolean;
   hasSearched?: boolean;
+  isAi?: boolean;
 }>();
 
 const favorites = useFavoritesStore();
