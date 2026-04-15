@@ -164,13 +164,11 @@ const imageSrc = computed(() => {
   height: 150px;
 }
 
-/* Ограничиваем ширину информационной колонки слева */
 .info-col {
   max-width: 35%;
   min-width: 200px;
 }
 
-/* Разрешаем сжиматься колонке с описанием */
 .description-col {
   min-width: 0;
 }
