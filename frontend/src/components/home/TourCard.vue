@@ -4,7 +4,7 @@
       <q-img :src="imageSrc" class="border-radius-md tour-image" />
     </div>
 
-    <div class="col-auto q-pl-lg">
+    <div class="col-auto q-pl-lg info-col">
       <div class="text-primary text-weight-bold q-mb-xs title-text">
         {{ tour.hotel_name }}
         <span v-if="tour.meta.hotel_category"
@@ -135,6 +135,8 @@ const imageSrc = computed(() => {
 <style scoped>
 .title-text {
   font-size: 24px;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .location-text,
 .hotel-text,
@@ -160,6 +162,17 @@ const imageSrc = computed(() => {
 .tour-image {
   width: 176px;
   height: 150px;
+}
+
+/* Ограничиваем ширину информационной колонки слева */
+.info-col {
+  max-width: 35%;
+  min-width: 200px;
+}
+
+/* Разрешаем сжиматься колонке с описанием */
+.description-col {
+  min-width: 0;
 }
 
 @media (min-width: 1024px) and (max-width: 1440px) {
@@ -189,6 +202,9 @@ const imageSrc = computed(() => {
   }
   .heart-icon {
     font-size: 32px;
+  }
+  .info-col {
+    max-width: 40%;
   }
 }
 </style>
