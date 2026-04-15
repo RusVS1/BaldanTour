@@ -253,7 +253,10 @@
           type="textarea"
           autogrow
           rows="3"
-          @blur="touched.aiQuery = true"
+          :error="!!errors.aiQuery"
+          :error-message="errors.aiQuery"
+          @blur="validateAiQuery"
+          @input="errors.aiQuery = ''"
         >
           <q-tooltip anchor="top middle" self="bottom middle" style="font-size: 12px">
             Например: "Пляжный отдых в Турции, всё включено, 7 ночей, 2 взрослых и ребёнок"
@@ -311,6 +314,10 @@ const touched = reactive({
   nights: false,
   tourists: false,
   aiQuery: false,
+});
+
+const errors = reactive({
+  aiQuery: '',
 });
 
 const from = ref<string | null>(null);
@@ -427,7 +434,27 @@ const isFormValid = computed(
     !!from.value && !!to.value && !!form.date.from && !!form.nights && form.tourists.adults >= 1,
 );
 
-const isAiFormValid = computed(() => aiQuery.value.trim().length >= 1 && aiQuery.value.trim().length <= 500);
+const isAiFormValid = computed(() => {
+  const query = aiQuery.value.trim();
+  return query.length >= 1 && query.length <= 500 && !errors.aiQuery;
+});
+
+function validateAiQuery() {
+  const query = aiQuery.value.trim();
+  
+  if (!query) {
+    errors.aiQuery = 'Введите описание вашего отдыха';
+    return false;
+  }
+  
+  if (query.length < 1 || query.length > 500) {
+    errors.aiQuery = 'От 1 до 500 символов';
+    return false;
+  }
+  
+  errors.aiQuery = '';
+  return true;
+}
 
 function handleSearch() {
   touched.from = touched.to = touched.date = touched.nights = touched.tourists = true;
@@ -448,9 +475,11 @@ function handleSearch() {
 
 function handleAiSearch() {
   touched.aiQuery = true;
-  if (!isAiFormValid.value) {
+  
+  if (!validateAiQuery()) {
     return;
   }
+  
   const params: AiSearchParams = {
     aiQuery: aiQuery.value.trim(),
     tab: 'ai',

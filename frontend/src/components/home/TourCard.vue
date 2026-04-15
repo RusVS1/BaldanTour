@@ -4,7 +4,7 @@
       <q-img :src="imageSrc" class="border-radius-md tour-image" />
     </div>
 
-    <div class="col-auto q-pl-lg">
+    <div class="col-auto q-pl-lg info-col">
       <div class="text-primary text-weight-bold q-mb-xs title-text">
         {{ tour.hotel_name }}
         <span v-if="tour.meta.hotel_category"
@@ -42,8 +42,9 @@
     <div class="col-auto q-pr-md text-right actions-col">
       <div class="q-mb-md price-text">{{ tour.price_per_person }} ₽ за человека</div>
 
-      <div class="q-mt-lg row items-center q-gutter-md justify-end">
+      <div class="q-mt-xl row items-center q-gutter-md justify-end">
         <q-icon
+          v-if="auth.user"
           :name="isFavorite ? 'favorite' : 'favorite_border'"
           :color="isFavorite ? '' : 'primary'"
           :style="isFavorite ? { color: '#dd5555' } : {}"
@@ -69,6 +70,9 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import type { TourBase } from 'src/api/filters';
+import { useAuthStore } from 'src/stores/auth';
+
+const auth = useAuthStore();
 
 const props = defineProps<{
   tour: TourBase;
@@ -90,15 +94,14 @@ const formatDate = (value?: string | null) => {
 
 const tourDateLabel = computed(() => {
   const dates = props.tour.trip_dates?.trim();
-  const nights = props.tour.nights ? `${props.tour.nights} ноч.` : '';
   if (dates) {
-    return [dates, nights].filter(Boolean).join(', ');
+    return dates
   }
 
   const from = formatDate(props.tour.departure_from);
   const to = formatDate(props.tour.departure_to);
   const range = from && to ? `${from} - ${to}` : from || to;
-  return [range, nights].filter(Boolean).join(', ');
+  return range;
 });
 
 const tourLink = computed(() => props.tour.booking_url || props.tour.buy_link || '');
@@ -132,6 +135,8 @@ const imageSrc = computed(() => {
 <style scoped>
 .title-text {
   font-size: 24px;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .location-text,
 .hotel-text,
@@ -157,6 +162,15 @@ const imageSrc = computed(() => {
 .tour-image {
   width: 176px;
   height: 150px;
+}
+
+.info-col {
+  max-width: 35%;
+  min-width: 200px;
+}
+
+.description-col {
+  min-width: 0;
 }
 
 @media (min-width: 1024px) and (max-width: 1440px) {
@@ -186,6 +200,9 @@ const imageSrc = computed(() => {
   }
   .heart-icon {
     font-size: 32px;
+  }
+  .info-col {
+    max-width: 40%;
   }
 }
 </style>

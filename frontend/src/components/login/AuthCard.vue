@@ -11,7 +11,8 @@
       <div class="text-h5 text-primary">{{ title }}</div>
 
       <div class="text-subtitle2 text-primary q-mb-md custom-opacity">
-        Добро пожаловать в <span class="brand-font">BaldanTour</span>
+        Добро пожаловать в
+        <span class="brand-font">BaldanTour</span>
       </div>
 
       <q-input
@@ -19,37 +20,25 @@
         outlined
         rounded
         label="Логин"
-        hint="3-32 символа: латиница, цифры, точка, дефис или подчёркивание"
         class="q-mb-md"
         :error="!!errors.login"
         :error-message="errors.login"
         @blur="validateLogin"
-        @keyup.enter="handleSubmit"
       />
 
       <q-input
         v-model="password"
         outlined
         rounded
-        :type="showPassword ? 'text' : 'password'"
+        type="password"
         label="Пароль"
-        hint="Минимум 8 символов, без пробелов, максимум 128 символов"
         class="q-mb-md"
         :error="!!errors.password"
         :error-message="errors.password"
         @blur="validatePassword"
-        @keyup.enter="handleSubmit"
-      >
-        <template #append>
-          <q-icon
-            :name="showPassword ? 'visibility_off' : 'visibility'"
-            class="cursor-pointer"
-            @click="showPassword = !showPassword"
-          />
-        </template>
-      </q-input>
+      />
 
-      <div v-if="errors.api" class="text-negative q-mb-md text-center">
+      <div v-if="errors.api" class="q-mb-md text-center" style="color: #c50000;">
         {{ errors.api }}
       </div>
 
@@ -73,10 +62,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, ref, reactive } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ApiError } from 'src/api/api';
 import { useAuthStore } from 'src/stores/auth';
+import { ApiError } from 'src/api/api';
 
 type Mode = 'login' | 'register';
 
@@ -85,7 +74,6 @@ const props = defineProps<{ mode: Mode }>();
 const login = ref('');
 const password = ref('');
 const loading = ref(false);
-const showPassword = ref(false);
 
 const errors = reactive({
   login: '',
@@ -98,22 +86,30 @@ const router = useRouter();
 const auth = useAuthStore();
 
 const title = computed(() => (props.mode === 'login' ? 'Вход' : 'Регистрация'));
-const buttonText = computed(() => (props.mode === 'login' ? 'Войти' : 'Создать аккаунт'));
+const buttonText = computed(() => (props.mode === 'login' ? 'Войти' : 'Сохранить'));
 const switchText = computed(() =>
   props.mode === 'login' ? 'Ещё нет аккаунта?' : 'У меня уже есть аккаунт',
 );
 const switchLink = computed(() => (props.mode === 'login' ? '/register' : '/login'));
+const loginRegex = /^[A-Za-z0-9._-]+$/;
+const passwordRegex = /^[A-Za-z0-9!@#$%^&*()_+=-]+$/;
 
 function validateLogin() {
-  const value = login.value.trim();
-  if (!value) {
+  if (!login.value.trim()) {
     errors.login = 'Введите логин';
     return false;
   }
-  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(value)) {
-    errors.login = 'Логин: 3-32 символа, латиница, цифры, . _ -';
+
+  if (login.value.length < 6 || login.value.length > 24) {
+    errors.login = 'Логин должен быть от 6 до 24 символов';
     return false;
   }
+
+  if (!loginRegex.test(login.value)) {
+    errors.login = 'Только английские буквы, цифры и некоторые спецсимволы';
+    return false;
+  }
+
   errors.login = '';
   return true;
 }
@@ -123,18 +119,17 @@ function validatePassword() {
     errors.password = 'Введите пароль';
     return false;
   }
-  if (password.value.length < 8) {
-    errors.password = 'Минимум 8 символов';
+
+  if (password.value.length < 8 || password.value.length > 16) {
+    errors.password = 'Пароль должен быть от 8 до 16 символов';
     return false;
   }
-  if (password.value.length > 128) {
-    errors.password = 'Максимум 128 символов';
+
+  if (!passwordRegex.test(password.value)) {
+    errors.password = 'Только английские буквы, цифры и спецсимволы';
     return false;
   }
-  if (/\s/.test(password.value)) {
-    errors.password = 'Пароль не должен содержать пробелы';
-    return false;
-  }
+
   errors.password = '';
   return true;
 }
@@ -157,20 +152,45 @@ async function handleSubmit() {
 
   try {
     if (props.mode === 'login') {
-      await auth.login(login.value.trim(), password.value);
+      await auth.login(login.value, password.value);
     } else {
-      await auth.register(login.value.trim(), password.value);
+      await auth.register(login.value, password.value);
     }
     const redirect = (route.query.redirect as string) || '/';
     await router.push(redirect);
   } catch (e: unknown) {
     if (e instanceof ApiError) {
-      errors.api = e.message || 'Ошибка авторизации';
+      const errorData = e.data as Record<string, unknown> | undefined;
+
+      const getErrorString = (val: unknown): string => {
+        if (typeof val === 'string') return val;
+        if (Array.isArray(val) && val.length > 0) {
+          return getErrorString(val[0]);
+        }
+        const str = String(val);
+        if (str !== '[object Object]') return str;
+        return '';
+      };
+
+      if (errorData?.login) {
+        const loginError = getErrorString(errorData.login);
+        if (loginError) errors.login = loginError;
+      } else if (errorData?.password) {
+        const passwordError = getErrorString(errorData.password);
+        if (passwordError) errors.password = passwordError;
+      } else if (errorData?.non_field_errors) {
+        const apiError = getErrorString(errorData.non_field_errors);
+        if (apiError) errors.api = apiError;
+      } else {
+        if (e.message) errors.api = e.message;
+      }
     } else if (e instanceof Error) {
-      errors.api = e.message;
+      if (e.message) errors.api = e.message;
     } else {
       errors.api = 'Неизвестная ошибка';
     }
+
+    console.error('Auth error:', e);
   } finally {
     loading.value = false;
   }
