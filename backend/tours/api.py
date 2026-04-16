@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlparse
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.db.models import Q
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiTypes, extend_schema
 from pgvector.django import CosineDistance
 from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .embeddings import get_embedder
 from .models import Favorite, Tour
+from .reranker import get_reranker
 
 COUNTRY_SLUG_TO_RU: dict[str, str] = {
     "abkhazia": "Абхазия",
@@ -135,14 +139,210 @@ def _parse_date(value: str | None) -> date | None:
     value = (value or "").strip()
     if not value:
         return None
-    return date.fromisoformat(value)
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _parse_int(value: str | None) -> int | None:
     value = (value or "").strip()
     if not value:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _bad_request(error: str, field: str | None = None) -> Response:
+    payload = {"error": error}
+    if field:
+        payload["field"] = field
+    return Response(payload, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _parse_page_params(params) -> tuple[int, int, Response | None]:
+    page_raw = params.get("page")
+    page_size_raw = params.get("page_size")
+    page = _parse_int(page_raw) if page_raw not in (None, "") else 1
+    page_size = _parse_int(page_size_raw) if page_size_raw not in (None, "") else 50
+    if page is None or page < 1:
+        return 1, 50, _bad_request("invalid_integer", "page")
+    if page_size is None or page_size < 1:
+        return 1, 50, _bad_request("invalid_integer", "page_size")
+    return page, min(page_size, 100), None
+
+
+QUERY_LIMIT = 500
+AI_DEFAULT_LIMIT = 10
+AI_MAX_LIMIT = 20
+AI_CANDIDATE_LIMIT = 80
+
+COUNTRY_QUERY_ALIASES = {
+    "турция": "turkey",
+    "турции": "turkey",
+    "турцию": "turkey",
+    "turkey": "turkey",
+    "египет": "egypt",
+    "египта": "egypt",
+    "egypt": "egypt",
+    "таиланд": "thailand",
+    "тайланд": "thailand",
+    "thailand": "thailand",
+    "оаэ": "uae",
+    "эмираты": "uae",
+    "uae": "uae",
+    "абхазия": "abkhazia",
+    "абхазию": "abkhazia",
+    "abkhazia": "abkhazia",
+    "беларусь": "belarus",
+    "беларуси": "belarus",
+    "belarus": "belarus",
+    "азербайджан": "azerbaijan",
+    "азербайджане": "azerbaijan",
+    "azerbaijan": "azerbaijan",
+    "узбекистан": "uzbekistan",
+    "узбекистане": "uzbekistan",
+    "uzbekistan": "uzbekistan",
+}
+
+TOWN_QUERY_ALIASES = {
+    "москва": "moskva",
+    "москвы": "moskva",
+    "moscow": "moskva",
+    "moskva": "moskva",
+    "санкт-петербург": "sankt-peterburg",
+    "петербург": "sankt-peterburg",
+    "spb": "sankt-peterburg",
+}
+
+MEAL_QUERY_ALIASES = {
+    "все включено": "AI",
+    "всё включено": "AI",
+    "all inclusive": "AI",
+    "завтрак": "BB",
+    "завтраки": "BB",
+    "без питания": "RO",
+    "полупансион": "HB",
+    "полный пансион": "FB",
+}
+
+
+CHILDREN_HOTEL_TYPE = "Для детей"
+ADULTS_HOTEL_TYPE = "Для взрослых"
+
+
+HOTEL_CATEGORY_WORDS = {
+    "одна": 1,
+    "один": 1,
+    "две": 2,
+    "два": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+}
+
+HOTEL_CATEGORY_PREFIXES = {
+    "одно": 1,
+    "двух": 2,
+    "трех": 3,
+    "четырех": 4,
+    "пяти": 5,
+}
+
+
+def _detect_hotel_category(normalized_query: str) -> int | None:
+    numeric_match = re.search(r"(?:^|\D)([1-5])\s*(?:\*|звезд\w*)(?:\D|$)", normalized_query)
+    if numeric_match:
+        return int(numeric_match.group(1))
+
+    for word, category in HOTEL_CATEGORY_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\s+звезд\w*\b", normalized_query):
+            return category
+
+    for prefix, category in HOTEL_CATEGORY_PREFIXES.items():
+        if re.search(rf"\b{re.escape(prefix)}звезд\w*\b", normalized_query):
+            return category
+
+    return None
+
+
+def _detect_audience_hotel_type(normalized_query: str) -> str | None:
+    adult_markers = (
+        "для взрослых",
+        "только для взрослых",
+        "без детей",
+        "18+",
+        "18 плюс",
+        "adults only",
+        "adult only",
+    )
+    child_markers = (
+        "для детей",
+        "с детьми",
+        "с ребенком",
+        "детский",
+        "детск",
+        "семей",
+        "kids",
+        "family",
+        "child friendly",
+    )
+
+    if any(marker in normalized_query for marker in adult_markers):
+        return ADULTS_HOTEL_TYPE
+    if any(marker in normalized_query for marker in child_markers):
+        return CHILDREN_HOTEL_TYPE
+    return None
+
+
+def _detect_query_filters(query: str) -> dict[str, str | int]:
+    q = " ".join((query or "").lower().replace("ё", "е").split())
+    detected: dict[str, str] = {}
+    for token, slug in COUNTRY_QUERY_ALIASES.items():
+        if token in q:
+            detected["country_slug"] = slug
+            break
+    for token, slug in TOWN_QUERY_ALIASES.items():
+        if token in q:
+            detected["townfrom"] = slug
+            break
+    for token, meal in MEAL_QUERY_ALIASES.items():
+        if token in q:
+            detected["meal"] = meal
+            break
+    if any(token in q for token in ("пляж", "море", "берег")):
+        detected["rest_type"] = "пляжный"
+    if hotel_type := _detect_audience_hotel_type(q):
+        detected["hotel_type"] = hotel_type
+    if hotel_category := _detect_hotel_category(q):
+        detected["hotel_category"] = hotel_category
+    return detected
+
+
+def _tour_ai_text(tour: Tour) -> str:
+    return " ".join(
+        part
+        for part in [
+            tour.hotel_name,
+            tour.country_ru,
+            tour.country_slug,
+            tour.townfrom_ru,
+            tour.townfrom,
+            tour.hotel_type,
+            tour.rest_type,
+            tour.meal,
+            _meal_extension(tour.meal),
+            tour.room,
+            tour.placement,
+            _text_content(tour.common_description)[:1200],
+            _text_content(tour.target_description)[:1200],
+            _text_content(tour.answer_description)[:1200],
+            (tour.raw_text or "")[:1200],
+        ]
+        if part
+    )
 
 
 def _hotel_name_from_base_link(base_link: str | None) -> str:
@@ -150,6 +350,18 @@ def _hotel_name_from_base_link(base_link: str | None) -> str:
         return ""
     path = urlparse(base_link).path.strip("/")
     return path.split("/")[-1] if path else ""
+
+
+def _booking_url_for_tour(tour: Tour) -> str | None:
+    url = (tour.booking_link or "").strip()
+    if not url:
+        return None
+    path = urlparse(url).path.lower()
+    # Parser may keep synthetic /tours/...#offer links internally to deduplicate
+    # offers, but the public API should expose only real booking links.
+    if "/booking/" not in path:
+        return None
+    return url
 
 
 def _description_for_tour(tour: Tour) -> str:
@@ -231,14 +443,20 @@ class TourSearchParams:
 
 class TourSearchResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
+    base_link = serializers.CharField(allow_blank=True, allow_null=True)
     hotel_slug = serializers.CharField()
     hotel_name = serializers.CharField()
     hotel_rating = serializers.CharField(allow_blank=True)
+    trip_dates = serializers.CharField(allow_blank=True)
+    departure_from = serializers.DateField(allow_null=True)
+    departure_to = serializers.DateField(allow_null=True)
+    nights = serializers.IntegerField(allow_null=True)
     hotel_type = serializers.CharField(allow_blank=True, allow_null=True)
     meal = serializers.CharField(allow_blank=True, allow_null=True)
     meal_extension = serializers.CharField(allow_blank=True)
     main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
     price_per_person = serializers.IntegerField(allow_null=True)
+    booking_url = serializers.CharField(allow_blank=True, allow_null=True)
     buy_link = serializers.CharField(allow_blank=True, allow_null=True)
     common_description = serializers.CharField(allow_blank=True)
     target_description = serializers.CharField(allow_blank=True)
@@ -306,9 +524,22 @@ class OkEnvelopeSerializer(serializers.Serializer):
     ok = serializers.BooleanField()
 
 
+class HealthAPI(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    @extend_schema(responses=OkEnvelopeSerializer)
+    def get(self, request):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        return Response({"ok": True})
+
+
 class TourSearchAPI(APIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = TourSearchEnvelopeSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "search"
 
     SORT_MAP = {
         "price_desc": ["-price_value", "id"],
@@ -396,14 +627,27 @@ class TourSearchAPI(APIView):
         hotel_category = None
         if (params.get("hotel_category") or "").strip():
             hotel_category = _parse_int(params.get("hotel_category"))
+            if hotel_category is None:
+                return _bad_request("invalid_integer", "hotel_category")
 
         sort = (params.get("sort") or "price_asc").strip()
         if sort not in self.SORT_MAP:
-            sort = "price_asc"
+            return _bad_request("invalid_sort", "sort")
 
-        page = max(int(params.get("page") or 1), 1)
-        page_size = int(params.get("page_size") or 50)
-        page_size = min(max(page_size, 1), 500)
+        page, page_size, page_error = _parse_page_params(params)
+        if page_error is not None:
+            return page_error
+
+        price_from = _parse_int(params.get("price_from") or params.get("price_min"))
+        price_to = _parse_int(params.get("price_to") or params.get("price_max"))
+        if (params.get("price_from") or params.get("price_min")) and price_from is None:
+            return _bad_request("invalid_integer", "price_from")
+        if (params.get("price_to") or params.get("price_max")) and price_to is None:
+            return _bad_request("invalid_integer", "price_to")
+        if price_from is not None and price_from < 0:
+            return _bad_request("negative_price", "price_from")
+        if price_to is not None and price_to < 0:
+            return _bad_request("negative_price", "price_to")
 
         search_params = TourSearchParams(
             townfrom=townfrom_in,
@@ -440,6 +684,10 @@ class TourSearchAPI(APIView):
             qs = qs.filter(hotel_category=hotel_category)
         if meal:
             qs = qs.filter(meal__iexact=meal)
+        if price_from is not None:
+            qs = qs.filter(price_value__gte=price_from * max(adult, 1))
+        if price_to is not None:
+            qs = qs.filter(price_value__lte=price_to * max(adult, 1))
 
         qs = qs.order_by(*self.SORT_MAP[sort])
         qs = qs.select_related("common_description", "target_description", "answer_description", "main_image")
@@ -465,6 +713,8 @@ class TourSearchAPI(APIView):
             "hotel_category": hotel_category,
             "meal": meal,
             "sort": sort,
+            "price_from": price_from,
+            "price_to": price_to,
         }
 
         results = []
@@ -486,15 +736,21 @@ class TourSearchAPI(APIView):
             results.append(
                 {
                     "id": tour.id,
+                    "base_link": tour.base_link,
                     "hotel_slug": _hotel_name_from_base_link(tour.base_link),
                     "hotel_name": tour.hotel_name or _hotel_name_from_base_link(tour.base_link),
                     "hotel_rating": tour.hotel_rating or "",
+                    "trip_dates": tour.trip_dates or "",
+                    "departure_from": tour.checkin_beg.isoformat() if tour.checkin_beg else None,
+                    "departure_to": tour.checkin_end.isoformat() if tour.checkin_end else None,
+                    "nights": tour.nights,
                     "hotel_type": tour.hotel_type or None,
                     "meal": tour.meal or None,
                     "meal_extension": _meal_extension(tour.meal),
                     "main_image_url": tour.main_image.url if tour.main_image else None,
                     "price_per_person": price_per_person,
-                    "buy_link": tour.booking_link,
+                    "booking_url": _booking_url_for_tour(tour),
+                    "buy_link": _booking_url_for_tour(tour),
                     "common_description": _text_content(tour.common_description),
                     "target_description": _text_content(tour.target_description),
                     "answer_description": _text_content(tour.answer_description),
@@ -640,8 +896,8 @@ class FavoriteFilterRestTypeAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         values = (
             Tour.objects.filter(favorites__user_id=user_id)
@@ -664,8 +920,8 @@ class FavoriteFilterHotelTypeAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         values = (
             Tour.objects.filter(favorites__user_id=user_id)
@@ -688,8 +944,8 @@ class FavoriteFilterMealAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         values = list(
             Tour.objects.filter(favorites__user_id=user_id)
@@ -727,8 +983,8 @@ class FavoriteFilterTownFromAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         pairs = (
             Tour.objects.filter(favorites__user_id=user_id)
@@ -752,8 +1008,8 @@ class FavoriteFilterCountryAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         pairs = (
             Tour.objects.filter(favorites__user_id=user_id)
@@ -777,8 +1033,8 @@ class FavoriteFilterHotelCategoryAPI(APIView):
     def get(self, request, user_id: int):
         try:
             _check_favorites_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         values = (
             Tour.objects.filter(favorites__user_id=user_id)
@@ -808,7 +1064,7 @@ class FavoriteEnvelopeSerializer(serializers.Serializer):
 
 
 class FavoriteToursAPI(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = FavoriteEnvelopeSerializer
 
     def _check_access(self, request, user_id: int) -> None:
@@ -817,14 +1073,14 @@ class FavoriteToursAPI(APIView):
     @extend_schema(
         parameters=[
             OpenApiParameter("user_id", OpenApiTypes.INT, required=True, location=OpenApiParameter.PATH),
-            OpenApiParameter("townfrom", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("country_slug", OpenApiTypes.STR, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_min", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("nights_max", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("child", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
-            OpenApiParameter("adult", OpenApiTypes.INT, required=True, location=OpenApiParameter.QUERY),
+            OpenApiParameter("townfrom", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("country_slug", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_from", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("departure_to", OpenApiTypes.DATE, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_min", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("nights_max", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("child", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter("adult", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("rest_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_type", OpenApiTypes.STR, required=False, location=OpenApiParameter.QUERY),
             OpenApiParameter("hotel_category", OpenApiTypes.INT, required=False, location=OpenApiParameter.QUERY),
@@ -842,11 +1098,6 @@ class FavoriteToursAPI(APIView):
         responses=FavoriteEnvelopeSerializer,
     )
     def get(self, request, user_id: int):
-        try:
-            self._check_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
-
         params = request.query_params
 
         townfrom_in = (params.get("townfrom") or "").strip()
@@ -860,29 +1111,18 @@ class FavoriteToursAPI(APIView):
         child = _parse_int(params.get("child"))
         adult = _parse_int(params.get("adult"))
 
-        missing = []
-        if not townfrom_in:
-            missing.append("townfrom")
-        if not country_in:
-            missing.append("country_slug")
-        if departure_from is None:
-            missing.append("departure_from")
-        if departure_to is None:
-            missing.append("departure_to")
-        if nights_min is None:
-            missing.append("nights_min")
-        if nights_max is None:
-            missing.append("nights_max")
-        if child is None:
-            missing.append("child")
-        if adult is None:
-            missing.append("adult")
-
-        if missing:
-            return Response(
-                {"error": "missing_required_params", "missing": missing},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if (params.get("departure_from") or params.get("checkin_from")) and departure_from is None:
+            return _bad_request("invalid_date", "departure_from")
+        if (params.get("departure_to") or params.get("checkin_to")) and departure_to is None:
+            return _bad_request("invalid_date", "departure_to")
+        if params.get("nights_min") and nights_min is None:
+            return _bad_request("invalid_integer", "nights_min")
+        if params.get("nights_max") and nights_max is None:
+            return _bad_request("invalid_integer", "nights_max")
+        if params.get("child") and child is None:
+            return _bad_request("invalid_integer", "child")
+        if params.get("adult") and adult is None:
+            return _bad_request("invalid_integer", "adult")
 
         rest_type = (params.get("rest_type") or "").strip() or None
         hotel_type = (params.get("hotel_type") or "").strip() or None
@@ -891,14 +1131,27 @@ class FavoriteToursAPI(APIView):
         hotel_category = None
         if (params.get("hotel_category") or "").strip():
             hotel_category = _parse_int(params.get("hotel_category"))
+            if hotel_category is None:
+                return _bad_request("invalid_integer", "hotel_category")
 
         sort = (params.get("sort") or "price_asc").strip()
         if sort not in TourSearchAPI.SORT_MAP:
-            sort = "price_asc"
+            return _bad_request("invalid_sort", "sort")
 
-        page = max(int(params.get("page") or 1), 1)
-        page_size = int(params.get("page_size") or 50)
-        page_size = min(max(page_size, 1), 500)
+        page, page_size, page_error = _parse_page_params(params)
+        if page_error is not None:
+            return page_error
+
+        price_from = _parse_int(params.get("price_from") or params.get("price_min"))
+        price_to = _parse_int(params.get("price_to") or params.get("price_max"))
+        if (params.get("price_from") or params.get("price_min")) and price_from is None:
+            return _bad_request("invalid_integer", "price_from")
+        if (params.get("price_to") or params.get("price_max")) and price_to is None:
+            return _bad_request("invalid_integer", "price_to")
+        if price_from is not None and price_from < 0:
+            return _bad_request("negative_price", "price_from")
+        if price_to is not None and price_to < 0:
+            return _bad_request("negative_price", "price_to")
 
         townfrom_value = _value_from_label(townfrom_in, TOWNFROM_SLUG_TO_RU)
         country_value = _value_from_label(country_in, COUNTRY_SLUG_TO_RU)
@@ -907,13 +1160,22 @@ class FavoriteToursAPI(APIView):
 
         qs = Tour.objects.filter(favorites__user_id=user_id)
 
-        qs = qs.filter(
-            (Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
-            & (Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
-        )
-        qs = qs.filter(adult=adult, child=child)
-        qs = qs.filter(nights__gte=nights_min, nights__lte=nights_max)
-        qs = qs.filter(checkin_beg__lte=departure_to, checkin_end__gte=departure_from)
+        if townfrom_in:
+            qs = qs.filter(Q(townfrom__iexact=townfrom_value) | Q(townfrom_ru__iexact=townfrom_label))
+        if country_in:
+            qs = qs.filter(Q(country_slug__iexact=country_value) | Q(country_ru__iexact=country_label))
+        if adult is not None:
+            qs = qs.filter(adult=adult)
+        if child is not None:
+            qs = qs.filter(child=child)
+        if nights_min is not None:
+            qs = qs.filter(nights__gte=nights_min)
+        if nights_max is not None:
+            qs = qs.filter(nights__lte=nights_max)
+        if departure_from is not None:
+            qs = qs.filter(checkin_end__gte=departure_from)
+        if departure_to is not None:
+            qs = qs.filter(checkin_beg__lte=departure_to)
 
         if rest_type:
             qs = qs.filter(rest_type__iexact=rest_type)
@@ -923,6 +1185,10 @@ class FavoriteToursAPI(APIView):
             qs = qs.filter(hotel_category=hotel_category)
         if meal:
             qs = qs.filter(meal__iexact=meal)
+        if price_from is not None:
+            qs = qs.filter(price_value__gte=price_from * max(adult or 1, 1))
+        if price_to is not None:
+            qs = qs.filter(price_value__lte=price_to * max(adult or 1, 1))
 
         qs = qs.order_by(*TourSearchAPI.SORT_MAP[sort])
         qs = qs.select_related("common_description", "target_description", "answer_description", "main_image")
@@ -932,12 +1198,12 @@ class FavoriteToursAPI(APIView):
         tours = list(qs[offset : offset + page_size])
 
         requested_meta = {
-            "townfrom": townfrom_label,
-            "country_slug": country_label,
-            "townfrom_value": townfrom_value,
-            "country_value": country_value,
-            "departure_from": departure_from.isoformat(),
-            "departure_to": departure_to.isoformat(),
+            "townfrom": townfrom_label if townfrom_in else None,
+            "country_slug": country_label if country_in else None,
+            "townfrom_value": townfrom_value if townfrom_in else None,
+            "country_value": country_value if country_in else None,
+            "departure_from": departure_from.isoformat() if departure_from else None,
+            "departure_to": departure_to.isoformat() if departure_to else None,
             "nights_min": nights_min,
             "nights_max": nights_max,
             "child": child,
@@ -947,6 +1213,8 @@ class FavoriteToursAPI(APIView):
             "hotel_category": hotel_category,
             "meal": meal,
             "sort": sort,
+            "price_from": price_from,
+            "price_to": price_to,
         }
 
         results = []
@@ -968,15 +1236,21 @@ class FavoriteToursAPI(APIView):
             results.append(
                 {
                     "id": tour.id,
+                    "base_link": tour.base_link,
                     "hotel_slug": _hotel_name_from_base_link(tour.base_link),
                     "hotel_name": tour.hotel_name or _hotel_name_from_base_link(tour.base_link),
                     "hotel_rating": tour.hotel_rating or "",
+                    "trip_dates": tour.trip_dates or "",
+                    "departure_from": tour.checkin_beg.isoformat() if tour.checkin_beg else None,
+                    "departure_to": tour.checkin_end.isoformat() if tour.checkin_end else None,
+                    "nights": tour.nights,
                     "hotel_type": tour.hotel_type or None,
                     "meal": tour.meal or None,
                     "meal_extension": _meal_extension(tour.meal),
                     "main_image_url": tour.main_image.url if tour.main_image else None,
                     "price_per_person": price_per_person,
-                    "buy_link": tour.booking_link,
+                    "booking_url": _booking_url_for_tour(tour),
+                    "buy_link": _booking_url_for_tour(tour),
                     "common_description": _text_content(tour.common_description),
                     "target_description": _text_content(tour.target_description),
                     "answer_description": _text_content(tour.answer_description),
@@ -1008,12 +1282,12 @@ class FavoriteToursAPI(APIView):
         tour_id = serializer.validated_data["tour_id"]
         try:
             self._check_access(request, user_id)
-        except serializers.ValidationError as e:
-            return Response({"error": "forbidden", "details": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except serializers.ValidationError:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         User = get_user_model()
-        User.objects.get(id=user_id)
-        Tour.objects.get(id=tour_id)
+        if not User.objects.filter(id=user_id).exists() or not Tour.objects.filter(id=tour_id).exists():
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         Favorite.objects.get_or_create(user_id=user_id, tour_id=tour_id)
         return Response({"ok": True}, status=status.HTTP_201_CREATED)
 
@@ -1036,7 +1310,8 @@ class FavoriteTourAPI(APIView):
 
 
 class AISearchRequestSerializer(serializers.Serializer):
-    query = serializers.CharField()
+    query = serializers.CharField(max_length=QUERY_LIMIT)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=AI_MAX_LIMIT)
 
 
 class AISearchMetaSerializer(serializers.Serializer):
@@ -1045,6 +1320,10 @@ class AISearchMetaSerializer(serializers.Serializer):
     embedding_provider = serializers.CharField()
     embedding_model = serializers.CharField(allow_blank=True)
     embedding_dim = serializers.IntegerField()
+    reranker_provider = serializers.CharField(allow_blank=True, required=False)
+    reranker_model = serializers.CharField(allow_blank=True, required=False)
+    detected_filters = serializers.DictField(required=False)
+    missing_embeddings = serializers.IntegerField(required=False)
 
 
 class AISearchResultSerializer(serializers.Serializer):
@@ -1060,6 +1339,9 @@ class AISearchResultSerializer(serializers.Serializer):
     room = serializers.CharField(allow_blank=True)
     placement = serializers.CharField(allow_blank=True)
     trip_dates = serializers.CharField(allow_blank=True)
+    departure_from = serializers.DateField(allow_null=True)
+    departure_to = serializers.DateField(allow_null=True)
+    nights = serializers.IntegerField(allow_null=True)
 
     # Pricing
     price_total = serializers.IntegerField(allow_null=True)
@@ -1070,6 +1352,7 @@ class AISearchResultSerializer(serializers.Serializer):
     meal_extension = serializers.CharField(allow_blank=True)
 
     main_image_url = serializers.CharField(allow_blank=True, allow_null=True)
+    booking_url = serializers.CharField(allow_blank=True, allow_null=True)
     buy_link = serializers.CharField(allow_blank=True, allow_null=True)
 
     common_description = serializers.CharField(allow_blank=True)
@@ -1090,6 +1373,8 @@ class AISearchEnvelopeSerializer(serializers.Serializer):
 class AISearchAPI(APIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = AISearchEnvelopeSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_search"
 
     @extend_schema(
         tags=["ai"],
@@ -1127,6 +1412,7 @@ class AISearchAPI(APIView):
                             "meal": "BB",
                             "meal_extension": "Завтрак",
                             "main_image_url": "https://files.anextour.ru/...",
+                            "booking_url": "https://anextour.ru/booking/...",
                             "buy_link": "https://anextour.ru/booking/...",
                             "common_description": "",
                             "target_description": "",
@@ -1160,6 +1446,7 @@ class AISearchAPI(APIView):
         req = AISearchRequestSerializer(data=request.data)
         req.is_valid(raise_exception=True)
         query = (req.validated_data["query"] or "").strip()
+        limit = req.validated_data.get("limit") or AI_DEFAULT_LIMIT
 
         if not query:
             return Response({"error": "empty_query"}, status=status.HTTP_400_BAD_REQUEST)
@@ -1167,22 +1454,55 @@ class AISearchAPI(APIView):
         embedder = get_embedder()
         try:
             qvec = embedder.embed_texts([query])[0]
-        except Exception as e:
-            return Response({"error": "embedding_failed", "details": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception:
+            return Response({"error": "embedding_failed"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        detected_filters = _detect_query_filters(query)
 
         qs = (
             Tour.objects.exclude(embedding__isnull=True)
             .annotate(distance=CosineDistance("embedding", qvec))
-            .order_by("distance", "id")
             .select_related("common_description", "target_description", "answer_description", "main_image")
             .prefetch_related("amenities")
         )
+        if country_slug := detected_filters.get("country_slug"):
+            qs = qs.filter(country_slug__iexact=country_slug)
+        if townfrom := detected_filters.get("townfrom"):
+            qs = qs.filter(townfrom__iexact=townfrom)
+        if meal := detected_filters.get("meal"):
+            qs = qs.filter(meal__iexact=meal)
+        if rest_type := detected_filters.get("rest_type"):
+            qs = qs.filter(rest_type__iexact=rest_type)
+        if hotel_type := detected_filters.get("hotel_type"):
+            qs = qs.filter(hotel_type__iexact=hotel_type)
+        if hotel_category := detected_filters.get("hotel_category"):
+            qs = qs.filter(hotel_category=hotel_category)
 
-        tours = list(qs)
+        qs = qs.order_by("distance", "id")
+
+        candidates = list(qs[:AI_CANDIDATE_LIMIT])
+        reranker = get_reranker()
+        reranker_provider = ""
+        reranker_model = ""
+        reranked_scores: dict[int, float] = {}
+        if reranker is not None and candidates:
+            try:
+                ranked = reranker.rerank(query, candidates, _tour_ai_text)
+                candidates = [row.item for row in ranked]
+                reranked_scores = {row.item.id: row.score for row in ranked}
+                reranker_provider = reranker.provider
+                reranker_model = reranker.model_name
+            except Exception:
+                reranker_provider = "unavailable"
+                reranker_model = getattr(reranker, "model_name", "")
+
+        tours = candidates[:limit]
         results = []
         for t in tours:
             distance = float(getattr(t, "distance", 0.0) or 0.0)
             score = max(0.0, 1.0 - distance)
+            if t.id in reranked_scores:
+                score = reranked_scores[t.id]
             price_per_person = int(t.price_value // max(t.adult, 1)) if t.price_value is not None else None
             results.append(
                 {
@@ -1195,6 +1515,9 @@ class AISearchAPI(APIView):
                     "room": t.room or "",
                     "placement": t.placement or "",
                     "trip_dates": t.trip_dates or "",
+                    "departure_from": t.checkin_beg.isoformat() if t.checkin_beg else None,
+                    "departure_to": t.checkin_end.isoformat() if t.checkin_end else None,
+                    "nights": t.nights,
                     "price_total": t.price_value,
                     "price_text": t.price_text or "",
                     "hotel_type": t.hotel_type or None,
@@ -1202,7 +1525,8 @@ class AISearchAPI(APIView):
                     "meal_extension": _meal_extension(t.meal),
                     "main_image_url": t.main_image.url if t.main_image else None,
                     "price_per_person": price_per_person,
-                    "buy_link": t.booking_link,
+                    "booking_url": _booking_url_for_tour(t),
+                    "buy_link": _booking_url_for_tour(t),
                     "common_description": _text_content(t.common_description),
                     "target_description": _text_content(t.target_description),
                     "answer_description": _text_content(t.answer_description),
@@ -1247,6 +1571,10 @@ class AISearchAPI(APIView):
                     "embedding_provider": embedder.provider,
                     "embedding_model": embedding_model,
                     "embedding_dim": embedder.dim,
+                    "reranker_provider": reranker_provider,
+                    "reranker_model": reranker_model,
+                    "detected_filters": detected_filters,
+                    "missing_embeddings": Tour.objects.filter(embedding__isnull=True).count(),
                 },
                 "results": results,
             }

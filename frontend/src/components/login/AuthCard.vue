@@ -38,7 +38,7 @@
         @blur="validatePassword"
       />
 
-      <div v-if="errors.api" class="text-negative q-mb-md text-center">
+      <div v-if="errors.api" class="q-mb-md text-center" style="color: #c50000;">
         {{ errors.api }}
       </div>
 
@@ -91,16 +91,25 @@ const switchText = computed(() =>
   props.mode === 'login' ? 'Ещё нет аккаунта?' : 'У меня уже есть аккаунт',
 );
 const switchLink = computed(() => (props.mode === 'login' ? '/register' : '/login'));
+const loginRegex = /^[A-Za-z0-9._-]+$/;
+const passwordRegex = /^[A-Za-z0-9!@#$%^&*()_+=-]+$/;
 
 function validateLogin() {
   if (!login.value.trim()) {
     errors.login = 'Введите логин';
     return false;
   }
-  if (login.value.length < 3) {
-    errors.login = 'Минимум 3 символа';
+
+  if (login.value.length < 6 || login.value.length > 24) {
+    errors.login = 'Логин должен быть от 6 до 24 символов';
     return false;
   }
+
+  if (!loginRegex.test(login.value)) {
+    errors.login = 'Только английские буквы, цифры и некоторые спецсимволы';
+    return false;
+  }
+
   errors.login = '';
   return true;
 }
@@ -110,10 +119,17 @@ function validatePassword() {
     errors.password = 'Введите пароль';
     return false;
   }
-  if (password.value.length < 6) {
-    errors.password = 'Минимум 6 символов';
+
+  if (password.value.length < 8 || password.value.length > 16) {
+    errors.password = 'Пароль должен быть от 8 до 16 символов';
     return false;
   }
+
+  if (!passwordRegex.test(password.value)) {
+    errors.password = 'Только английские буквы, цифры и спецсимволы';
+    return false;
+  }
+
   errors.password = '';
   return true;
 }

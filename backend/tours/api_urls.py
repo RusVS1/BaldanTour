@@ -4,6 +4,7 @@ from . import api
 from .fx_api import RubFxRatesAPI
 
 urlpatterns = [
+    path("health/", api.HealthAPI.as_view(), name="api_health"),
     path("tours/", api.TourSearchAPI.as_view(), name="api_tour_search"),
     path("ai/search/", api.AISearchAPI.as_view(), name="api_ai_search"),
     path("filters/rest-type/", api.FilterRestTypeAPI.as_view(), name="api_filter_rest_type"),

@@ -60,8 +60,15 @@ try:
         print(f"Embedding model preloaded: provider={embedder.provider} dim={embedder.dim}")
     else:
         print(f"Embedding preload skipped for provider={embedder.provider}")
+
+    from tours.reranker import get_reranker
+
+    reranker = get_reranker()
+    if reranker is not None:
+        reranker.rerank("warmup", ["warmup tour"], lambda value: value)
+        print(f"AI reranker preloaded: provider={reranker.provider} model={reranker.model_name}")
 except Exception as exc:
-    print(f"WARNING: embedding preload failed: {exc}")
+    print(f"WARNING: AI model preload failed: {exc}")
 PY
 ) &
 

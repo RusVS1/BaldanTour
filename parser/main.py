@@ -26,6 +26,30 @@ from pgvector.psycopg import register_vector
 
 NIGHT_RANGES = [(1, 8), (9, 16), (17, 24), (25, 28)]
 
+RU_MONTHS = {
+    "янв": 1,
+    "январ": 1,
+    "фев": 2,
+    "феврал": 2,
+    "мар": 3,
+    "март": 3,
+    "апр": 4,
+    "апрел": 4,
+    "май": 5,
+    "мая": 5,
+    "июн": 6,
+    "июн": 6,
+    "июл": 7,
+    "июл": 7,
+    "авг": 8,
+    "август": 8,
+    "сен": 9,
+    "сент": 9,
+    "окт": 10,
+    "ноя": 11,
+    "дек": 12,
+}
+
 
 def _default_checkin_window() -> tuple[str, str]:
     start_date = date.today() + timedelta(days=4)
@@ -350,6 +374,15 @@ def build_db_emitter(batch_size: int):
         except ValueError:
             return None, text
 
+    def is_real_booking_url_db(value: str | None) -> bool:
+        url = (value or "").strip()
+        if not url:
+            return False
+        try:
+            return "/booking/" in urlparse(url).path.lower()
+        except Exception:
+            return False
+
     def split_amenities_db(value: str | None) -> list[str]:
         if not value:
             return []
@@ -463,13 +496,20 @@ def build_db_emitter(batch_size: int):
 
             country_slug = str(row.get("country_slug") or "").strip()
             townfrom = str(row.get("townfrom") or "").strip()
-            image_url = str(row.get("main_image_url") or "").strip() or None
+            image_url = str(row.get("main_image_url") or "").strip()
+            image_url = None if is_placeholder_hotel_image_url(image_url) else image_url
             image_hash = sha256_text_db(image_url) if image_url else None
             if image_hash and image_hash not in self.image_by_hash:
                 self.image_by_hash[image_hash] = image_url or ""
 
             direct_hotel_type = normalize_hotel_type_db(str(row.get("hotel_type") or ""))
             hotel_category = parse_int_db(row.get("hotel_stars"))
+            trip_dates, trip_checkin_beg, trip_checkin_end = parse_trip_dates_range(
+                str(row.get("trip_dates") or ""),
+                str(row.get("checkin_beg") or ""),
+            )
+            checkin_beg_value = trip_checkin_beg or str(row.get("checkin_beg") or "")
+            checkin_end_value = trip_checkin_end or str(row.get("checkin_end") or "")
 
             embed_text = " ".join(
                 [
@@ -495,11 +535,11 @@ def build_db_emitter(batch_size: int):
                 "child": parse_int_db(row.get("child")) or 0,
                 "night_min": parse_int_db(row.get("night_min")),
                 "night_max": parse_int_db(row.get("night_max")),
-                "checkin_beg": parse_date_yyyymmdd_db(str(row.get("checkin_beg") or "")),
-                "checkin_end": parse_date_yyyymmdd_db(str(row.get("checkin_end") or "")),
+                "checkin_beg": parse_date_yyyymmdd_db(checkin_beg_value),
+                "checkin_end": parse_date_yyyymmdd_db(checkin_end_value),
                 "hotel_name": str(row.get("hotel_name") or "").strip(),
                 "hotel_rating": str(row.get("hotel_rating") or "").strip(),
-                "trip_dates": str(row.get("trip_dates") or "").strip(),
+                "trip_dates": trip_dates or str(row.get("trip_dates") or "").strip(),
                 "nights": parse_int_db(row.get("nights")),
                 "room": str(row.get("room") or "").strip(),
                 "meal": str(row.get("meal") or "").strip(),
@@ -512,6 +552,10 @@ def build_db_emitter(batch_size: int):
                 "booking_link": str(row.get("booking_link") or "").strip() or None,
                 "raw_text": str(row.get("raw_text") or "").strip(),
             }
+
+            if not tour["hotel_name"] or not tour["price_value"] or not is_real_booking_url_db(tour["booking_link"]):
+                print("[db] skipped incomplete tour row", flush=True)
+                return
 
             self.to_create.append(tour)
             self.pending_amenities.append(split_amenities_db(str(row.get("functions") or "")))
@@ -538,7 +582,7 @@ def build_db_emitter(batch_size: int):
                     for tour, vector in zip(tours, vectors, strict=False):
                         tour["embedding"] = vector
                 except Exception as exc:
-                    print(f"[db] WARNING: embeddings skipped for batch: {exc}", flush=True)
+                    raise RuntimeError(f"embeddings failed for parser batch: {exc}") from exc
 
             conn = self._get_conn()
             with conn.transaction():
@@ -597,6 +641,47 @@ def build_db_emitter(batch_size: int):
                             (booking_links,),
                         )
                         existing_by_booking = {booking_link: id_ for (id_, booking_link) in cur.fetchall() if booking_link}
+
+                    update_rows = [tour for tour in tours if tour["booking_link"] and tour["booking_link"] in existing_by_booking]
+                    if update_rows:
+                        cur.executemany(
+                            """
+                            UPDATE tours_tour SET
+                                country_slug = %(country_slug)s,
+                                country_ru = %(country_ru)s,
+                                base_link = %(base_link)s,
+                                request_url = %(request_url)s,
+                                townfrom = %(townfrom)s,
+                                townfrom_ru = %(townfrom_ru)s,
+                                adult = %(adult)s,
+                                child = %(child)s,
+                                night_min = %(night_min)s,
+                                night_max = %(night_max)s,
+                                checkin_beg = %(checkin_beg)s,
+                                checkin_end = %(checkin_end)s,
+                                hotel_name = %(hotel_name)s,
+                                hotel_rating = %(hotel_rating)s,
+                                main_image_id = %(main_image_id)s,
+                                common_description_id = %(common_description_id)s,
+                                target_description_id = %(target_description_id)s,
+                                answer_description_id = %(answer_description_id)s,
+                                trip_dates = %(trip_dates)s,
+                                nights = %(nights)s,
+                                room = %(room)s,
+                                meal = %(meal)s,
+                                placement = %(placement)s,
+                                rest_type = %(rest_type)s,
+                                hotel_type = %(hotel_type)s,
+                                hotel_category = %(hotel_category)s,
+                                price_text = %(price_text)s,
+                                price_value = %(price_value)s,
+                                embedding = %(embedding)s,
+                                raw_text = %(raw_text)s,
+                                updated_at = NOW()
+                            WHERE booking_link = %(booking_link)s
+                            """,
+                            update_rows,
+                        )
 
                     insert_rows = [tour for tour in tours if not tour["booking_link"] or tour["booking_link"] not in existing_by_booking]
                     created_by_booking = dict(existing_by_booking)
@@ -668,6 +753,15 @@ def build_db_emitter(batch_size: int):
                     cur.execute("DELETE FROM tours_tourtext")
                     cur.execute("DELETE FROM tours_tourimage")
 
+        def purge_stale_tours(self) -> int:
+            conn = self._get_conn()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM tours_tour WHERE checkin_beg IS NOT NULL AND checkin_beg < CURRENT_DATE"
+                    )
+                    return cur.rowcount or 0
+
         def _reset_batch(self) -> None:
             self.to_create = []
             self.pending_amenities = []
@@ -688,22 +782,103 @@ def build_db_emitter(batch_size: int):
     async def truncate() -> None:
         await sync_to_async(importer.truncate_all, thread_sensitive=True)()
 
-    return emit, finalize, truncate
+    async def purge_stale() -> int:
+        return await sync_to_async(importer.purge_stale_tours, thread_sensitive=True)()
+
+    return emit, finalize, truncate, purge_stale
 
 
 def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
 
 
+def _ru_month_number(value: str) -> int | None:
+    normalized = (value or "").strip().lower().replace("ё", "е").rstrip(".")
+    for prefix, number in RU_MONTHS.items():
+        if normalized.startswith(prefix):
+            return number
+    return None
+
+
+def parse_trip_dates_range(value: str, reference_yyyymmdd: str | None = None) -> tuple[str, str, str]:
+    text = normalize_space(value)
+    if not text:
+        return "", "", ""
+
+    reference_year = date.today().year
+    reference_yyyymmdd = (reference_yyyymmdd or "").strip()
+    if re.fullmatch(r"\d{8}", reference_yyyymmdd):
+        reference_year = int(reference_yyyymmdd[:4])
+
+    numeric = re.search(
+        r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s*[-–]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b",
+        text,
+    )
+    if numeric:
+        d1, m1, y1, d2, m2, y2 = numeric.groups()
+        start_year = int(y1 or reference_year)
+        end_year = int(y2 or start_year)
+        start = date(start_year, int(m1), int(d1))
+        end = date(end_year, int(m2), int(d2))
+        if end < start:
+            end = date(end.year + 1, end.month, end.day)
+        return (
+            f"{start:%d.%m.%Y} - {end:%d.%m.%Y}",
+            start.strftime("%Y%m%d"),
+            end.strftime("%Y%m%d"),
+        )
+
+    word_month = re.search(
+        r"\b(\d{1,2})\s+([а-яё]+)\.?\s*[-–]\s*(\d{1,2})\s+([а-яё]+)\.?(?:\s+(\d{4}))?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if word_month:
+        d1, m1_text, d2, m2_text, year_text = word_month.groups()
+        m1 = _ru_month_number(m1_text)
+        m2 = _ru_month_number(m2_text)
+        if not m1 or not m2:
+            return text, "", ""
+        start_year = int(year_text or reference_year)
+        start = date(start_year, m1, int(d1))
+        end = date(start_year, m2, int(d2))
+        if end < start:
+            end = date(end.year + 1, end.month, end.day)
+        return (
+            f"{start:%d.%m.%Y} - {end:%d.%m.%Y}",
+            start.strftime("%Y%m%d"),
+            end.strftime("%Y%m%d"),
+        )
+
+    return text, "", ""
+
+
 def extract_hotel_stars_from_name(hotel_name: str) -> str:
     """
     Extract stars count from hotel name/title.
-    Examples: "Hotel Abc 4*", "Hotel Abc 4 *", "Hotel Abc 4 звезды".
+    Examples: "Hotel Abc 4*", "Hotel Abc 4 *", "Hotel Abc 4 звезды",
+    "Hotel Abc - отель 4 в Узбекистане".
     Returns "" if not found.
     """
     s = normalize_space(hotel_name)
-    m = re.search(r"\b([1-5])\s*(?:\*|звезд(?:а|ы)?)\b", s, flags=re.I)
+    m = re.search(r"\b([1-5])\s*(?:\*|звезд(?:а|ы)?|stars?)\b", s, flags=re.I)
+    if not m:
+        m = re.search(r"(?:отель|hotel)\s+([1-5])\b", s, flags=re.I)
     return m.group(1) if m else ""
+
+
+def is_placeholder_hotel_image_url(url: str) -> bool:
+    s = (url or "").strip().lower()
+    if not s:
+        return True
+    return (
+        "logo-anex" in s
+        or "/logo/" in s
+        or s.endswith(".svg")
+        or "user-files/elfinder/com/logo" in s
+        or "/sliders/" in s
+        or "/pop-up/" in s
+    )
 
 
 def infer_hotel_type_from_target_description(target_description: str) -> str:
@@ -962,7 +1137,10 @@ async def click_show_more_until_end(page: Any, max_clicks: int = 200) -> None:
             except Exception:
                 pass
 
-        cur = await page.eval_on_selector_all("a[href*='booking'],a[href*='/booking']", "els => els.length")
+        cur = await page.eval_on_selector_all(
+            "a[href*='booking'],a[href*='/booking'],[gtm-label='room-card-item-offer-button']",
+            "els => els.length",
+        )
         if cur <= prev_count and not clicked:
             stale += 1
         else:
@@ -974,7 +1152,171 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
     js = r"""
     () => {
       const clean = (x) => (x || '').replace(/\s+/g, ' ').trim();
+      const pad2 = (value) => String(value).padStart(2, '0');
+      const params = new URLSearchParams(window.location.search || '');
+      const ref = params.get('CHECKIN_BEG') || '';
+      const defaultYear = /^\d{8}$/.test(ref) ? Number(ref.slice(0, 4)) : new Date().getFullYear();
+      const monthMap = {
+        'янв': 1, 'январ': 1,
+        'фев': 2, 'феврал': 2,
+        'мар': 3, 'март': 3,
+        'апр': 4, 'апрел': 4,
+        'май': 5, 'мая': 5,
+        'июн': 6,
+        'июл': 7,
+        'авг': 8, 'август': 8,
+        'сен': 9, 'сент': 9,
+        'окт': 10,
+        'ноя': 11,
+        'дек': 12
+      };
+      const monthNumber = (value) => {
+        const s = clean(value).toLowerCase().replace('ё', 'е').replace(/\.$/, '');
+        for (const [prefix, n] of Object.entries(monthMap)) {
+          if (s.startsWith(prefix)) return n;
+        }
+        return 0;
+      };
+      const dateParts = (year, month, day) => ({
+        label: `${pad2(day)}.${pad2(month)}.${year}`,
+        yyyymmdd: `${year}${pad2(month)}${pad2(day)}`
+      });
+      const stableHash = (value) => {
+        let h = 0;
+        for (let i = 0; i < value.length; i++) {
+          h = ((h << 5) - h + value.charCodeAt(i)) | 0;
+        }
+        return Math.abs(h).toString(36);
+      };
+      const parseDateRange = (raw) => {
+        const text = clean(raw);
+        if (!text) return { label: '', beg: '', end: '' };
+
+        let m = text.match(/\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s*[-–]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b/);
+        if (m) {
+          const startYear = Number(m[3] || defaultYear);
+          let endYear = Number(m[6] || startYear);
+          const start = dateParts(startYear, Number(m[2]), Number(m[1]));
+          let end = dateParts(endYear, Number(m[5]), Number(m[4]));
+          if (end.yyyymmdd < start.yyyymmdd) {
+            endYear += 1;
+            end = dateParts(endYear, Number(m[5]), Number(m[4]));
+          }
+          return { label: `${start.label} - ${end.label}`, beg: start.yyyymmdd, end: end.yyyymmdd };
+        }
+
+        m = text.match(/(\d{1,2})\s+([а-яё]+)\.?\s*[-–]\s*(\d{1,2})\s+([а-яё]+)\.?(?:\s+(\d{4}))?/i);
+        if (m) {
+          const startMonth = monthNumber(m[2]);
+          const endMonth = monthNumber(m[4]);
+          if (!startMonth || !endMonth) return { label: clean(m[0]), beg: '', end: '' };
+          const startYear = Number(m[5] || defaultYear);
+          let endYear = startYear;
+          const start = dateParts(startYear, startMonth, Number(m[1]));
+          let end = dateParts(endYear, endMonth, Number(m[3]));
+          if (end.yyyymmdd < start.yyyymmdd) {
+            endYear += 1;
+            end = dateParts(endYear, endMonth, Number(m[3]));
+          }
+          return { label: `${start.label} - ${end.label}`, beg: start.yyyymmdd, end: end.yyyymmdd };
+        }
+
+        return { label: '', beg: '', end: '' };
+      };
+      const absoluteUrl = (value) => {
+        const raw = clean(value);
+        if (!raw) return '';
+        try {
+          return new URL(raw, window.location.origin).toString();
+        } catch {
+          return raw;
+        }
+      };
+      const bookingFromLinkObject = (value) => {
+        if (!value) return '';
+        if (typeof value === 'string') {
+          const url = absoluteUrl(value);
+          return /\/booking\//i.test(url) ? url : '';
+        }
+        if (typeof value !== 'object') return '';
+        const pathname = clean(value.pathname || value.href || value.url || value.link || value.to || '');
+        if (!pathname || !/\/booking\//i.test(pathname)) return '';
+        const url = new URL(pathname, window.location.origin);
+        const query = value.query || value.params || {};
+        if (query && typeof query === 'object') {
+          for (const [key, raw] of Object.entries(query)) {
+            if (raw == null) continue;
+            if (Array.isArray(raw)) {
+              for (const item of raw) url.searchParams.append(key, String(item));
+            } else {
+              url.searchParams.set(key, String(raw));
+            }
+          }
+        }
+        return url.toString();
+      };
+      const bookingFromProps = (props) => {
+        if (!props || typeof props !== 'object') return '';
+        const direct =
+          bookingFromLinkObject(props.link) ||
+          bookingFromLinkObject(props.href) ||
+          bookingFromLinkObject(props.to) ||
+          bookingFromLinkObject(props.url);
+        if (direct) return direct;
+        const children = props.children;
+        if (children && typeof children === 'object') {
+          const arr = Array.isArray(children) ? children : [children];
+          for (const child of arr) {
+            const nested = bookingFromProps(child && child.props);
+            if (nested) return nested;
+          }
+        }
+        return '';
+      };
+      const reactFiberFor = (node) => {
+        if (!node) return null;
+        const key = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        return key ? node[key] : null;
+      };
+      const reactPropsFor = (node) => {
+        if (!node) return null;
+        const key = Object.keys(node).find((k) => k.startsWith('__reactProps$'));
+        return key ? node[key] : null;
+      };
+      const bookingFromReact = (node) => {
+        const directProps = bookingFromProps(reactPropsFor(node));
+        if (directProps) return directProps;
+        let fiber = reactFiberFor(node);
+        let depth = 0;
+        while (fiber && depth < 16) {
+          const fromProps = bookingFromProps(fiber.memoizedProps);
+          if (fromProps) return fromProps;
+          fiber = fiber.return;
+          depth++;
+        }
+        return '';
+      };
+      const bookingFromElement = (node) => {
+        if (!node) return '';
+        const anchor = node.closest && node.closest('a[href]');
+        if (anchor) {
+          const href = absoluteUrl(anchor.href || anchor.getAttribute('href') || '');
+          if (/\/booking\//i.test(href)) return href;
+        }
+        let current = node;
+        for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {
+          const fromReact = bookingFromReact(current);
+          if (fromReact) return fromReact;
+          for (const attr of Array.from(current.attributes || [])) {
+            const url = absoluteUrl(attr.value || '');
+            if (/\/booking\//i.test(url)) return url;
+          }
+        }
+        return '';
+      };
       const offerLinks = Array.from(document.querySelectorAll('a[href*="booking"],a[href*="/booking"]'));
+      const offerButtons = Array.from(document.querySelectorAll('[gtm-label="room-card-item-offer-button"]'));
+      const usedButtonIndexes = new Set();
       const out = [];
 
       const iconMap = {
@@ -1006,7 +1348,7 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
       const mealCodes = ['RO','BB','HB','FB','AI','UAI','AO','BO','HB+','FB+','AI+','UAI+'];
 
       for (const a of offerLinks) {
-        const booking = clean(a.href || a.getAttribute('href') || '');
+        const booking = bookingFromElement(a) || clean(a.href || a.getAttribute('href') || '');
         if (!booking) continue;
 
         const card = a.closest('article') || a.closest('li') || a.closest("div[class*='card']") || a.closest("div[class*='offer']") || a.closest('div');
@@ -1016,7 +1358,7 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
         const text = clean(textRaw);
         if (!text) continue;
 
-        const dateMatch = text.match(/\b\d{2}\.\d{2}\.\d{4}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}\b/);
+        let dateInfo = parseDateRange(text);
         const nightsMatch = text.match(/(\d{1,2})\s*ноч/i) || text.match(/ночей?\s*(\d{1,2})/i);
         const priceMatch = text.match(/\d[\d\s]{2,}(?:\s?₽|\s?руб|\s?р\b)/i);
 
@@ -1030,8 +1372,8 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
           room = clean(textRaw.slice(0, idxTrip));
         } else {
           // Fallback: everything before the first date range if label is absent.
-          if (dateMatch && dateMatch[0]) {
-            const idx = text.indexOf(dateMatch[0]);
+          if (dateInfo.label) {
+            const idx = text.indexOf(dateInfo.label);
             if (idx > 0) room = clean(text.slice(0, idx));
           }
         }
@@ -1039,13 +1381,19 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
         let meal = '';
         let placement = '';
         let funcs = [...globalFunctions];
-        let tripDates = dateMatch ? clean(dateMatch[0]) : '';
+        let tripDates = dateInfo.label;
+        let checkinBeg = dateInfo.beg;
+        let checkinEnd = dateInfo.end;
         let nights = nightsMatch ? clean(nightsMatch[1]) : '';
 
         for (const line of lines) {
           if (!tripDates) {
-            const dm = line.match(/\b\d{2}\.\d{2}\.\d{4}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}\b/);
-            if (dm) tripDates = clean(dm[0]);
+            dateInfo = parseDateRange(line);
+            if (dateInfo.label) {
+              tripDates = dateInfo.label;
+              checkinBeg = dateInfo.beg;
+              checkinEnd = dateInfo.end;
+            }
           }
           if (!nights) {
             const nm = line.match(/(\d{1,2})\s*ноч/i) || line.match(/ночей?\s*(\d{1,2})/i);
@@ -1084,6 +1432,8 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
         out.push({
           functions: Array.from(new Set(funcs)).join('; '),
           trip_dates: tripDates,
+          checkin_beg: checkinBeg,
+          checkin_end: checkinEnd,
           nights: nights,
           room: clean(room),
           meal: clean(meal),
@@ -1094,13 +1444,104 @@ async def extract_offer_cards(page: Any) -> list[dict[str, str]]:
         });
       }
 
+      if (!out.length) {
+        const lines = (document.body.innerText || '').split('\n').map(clean).filter(Boolean);
+        const pageUrl = clean(window.location.href || '').replace(/#.*$/, '');
+        for (let i = 0; i < lines.length; i++) {
+          if (!/^дата поездки$/i.test(lines[i])) continue;
+
+          const dateInfo = parseDateRange(lines[i + 1] || '');
+          if (!dateInfo.label || !dateInfo.beg || !dateInfo.end) continue;
+
+          let nights = '';
+          let room = '';
+          let meal = '';
+          let placement = '';
+          let price = '';
+
+          for (let j = i + 2; j < Math.min(lines.length, i + 18); j++) {
+            const line = lines[j];
+            const next = lines[j + 1] || '';
+            if (/^дата поездки$/i.test(line)) break;
+            if (/^ноч(ей|и)?$/i.test(line)) {
+              const nm = next.match(/(\d{1,2})\s*ноч/i);
+              if (nm) nights = nm[1];
+              continue;
+            }
+            if (!nights) {
+              const nm = line.match(/(\d{1,2})\s*ноч/i);
+              if (nm) nights = nm[1];
+            }
+            if (/^комната$/i.test(line)) {
+              room = next;
+              continue;
+            }
+            if (/^питание$/i.test(line)) {
+              const mealMatch = next.match(/\b(UAI\+|AI\+|FB\+|HB\+|UAI|AI|FB|HB|BB|RO|AO|BO)\b/i);
+              meal = mealMatch ? mealMatch[1].toUpperCase() : next;
+              continue;
+            }
+            if (!price) {
+              const pm = line.match(/\d[\d\s]{2,}(?:\s?₽|\s?руб|\s?р\b)/i);
+              if (pm) price = clean(pm[0]);
+            }
+          }
+
+          if (!price) continue;
+          const priceDigits = price.replace(/\D+/g, '');
+          let buttonIndex = offerButtons.findIndex((button, idx) => {
+            if (usedButtonIndexes.has(idx)) return false;
+            return clean(button.innerText).replace(/\D+/g, '') === priceDigits;
+          });
+          if (buttonIndex < 0) {
+            buttonIndex = offerButtons.findIndex((_, idx) => !usedButtonIndexes.has(idx));
+          }
+          const button = buttonIndex >= 0 ? offerButtons[buttonIndex] : null;
+          if (buttonIndex >= 0) usedButtonIndexes.add(buttonIndex);
+          placement = lines[i - 1] || '';
+          const rawBlock = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 14)).join(' ');
+          const identity = [i, dateInfo.label, nights, room, meal, placement, price].join('|');
+          const booking = bookingFromElement(button);
+          out.push({
+            functions: Array.from(new Set(globalFunctions)).join('; '),
+            trip_dates: dateInfo.label,
+            checkin_beg: dateInfo.beg,
+            checkin_end: dateInfo.end,
+            nights: nights,
+            room: clean(room),
+            meal: clean(meal),
+            placement: clean(placement),
+            price: price,
+            booking_link: booking || `${pageUrl}#offer-${stableHash(identity)}`,
+            raw_text: rawBlock
+          });
+        }
+      }
+
       return out;
     }
     """
     items = await page.evaluate(js)
     uniq = {}
     for it in items:
-        key = (it.get("booking_link", ""), it.get("raw_text", ""))
+        reference_checkin = ""
+        try:
+            reference_checkin = parse_qs(urlparse(page.url).query).get("CHECKIN_BEG", [""])[0]
+        except Exception:
+            reference_checkin = ""
+        trip_dates = normalize_space(str(it.get("trip_dates") or ""))
+        raw_text = normalize_space(str(it.get("raw_text") or ""))
+        parsed_trip_dates, parsed_beg, parsed_end = parse_trip_dates_range(
+            trip_dates or raw_text,
+            reference_checkin,
+        )
+        if parsed_trip_dates:
+            it["trip_dates"] = parsed_trip_dates
+        if parsed_beg and not it.get("checkin_beg"):
+            it["checkin_beg"] = parsed_beg
+        if parsed_end and not it.get("checkin_end"):
+            it["checkin_end"] = parsed_end
+        key = (it.get("booking_link", ""), "") if it.get("booking_link") else ("", it.get("raw_text", ""))
         uniq[key] = it
     return list(uniq.values())
 
@@ -1117,34 +1558,42 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
         if (u.startsWith('//')) return 'https:' + u;
         return u;
       };
+      const isHotelImage = (u) => {
+        const s = clean(u).toLowerCase();
+        if (!s) return false;
+        if (s.includes('logo-anex') || s.includes('/logo/') || s.endsWith('.svg')) return false;
+        if (s.includes('user-files/elfinder/com/logo')) return false;
+        if (s.includes('/sliders/') || s.includes('/pop-up/')) return false;
+        return s.includes('/hotel/') || s.includes('/hotels/');
+      };
 
+      const pageTitle = clean(document.title || '');
       const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
 
       let hotelName = clean(document.querySelector('h1[data-hotelinc]')?.textContent || '');
       if (!hotelName) hotelName = clean(document.querySelector('h1')?.textContent || '');
-      if (!hotelName) hotelName = clean(document.title || '');
+      if (!hotelName) hotelName = pageTitle;
 
       // Primary: first photo in the gallery block (grid with hotel images)
       let imageUrl = '';
       const gridImg =
         document.querySelector('div.grid.gap-16.w-full img[src]') ||
         document.querySelector('div.grid img[src]');
-      if (gridImg) imageUrl = abs(clean(gridImg.getAttribute('src') || ''));
+      if (gridImg) {
+        const candidate = abs(clean(gridImg.getAttribute('src') || ''));
+        if (isHotelImage(candidate)) imageUrl = candidate;
+      }
 
       // Fallbacks
-      if (!imageUrl) imageUrl = abs(clean(ogImage));
       if (!imageUrl) {
-        const imgs = Array.from(document.querySelectorAll('img[src]'))
-          .map((img) => img.getAttribute('src') || '')
-          .map(clean)
-          .filter((s) => s.includes('files.anextour.ru/hotel/') || s.includes('/hotel/'));
-        if (imgs.length) imageUrl = abs(imgs[0]);
+        const candidate = abs(clean(ogImage));
+        if (isHotelImage(candidate)) imageUrl = candidate;
       }
       if (!imageUrl) {
         const imgs = Array.from(document.querySelectorAll('img[src]'))
           .map((img) => img.getAttribute('src') || '')
           .map(clean)
-          .filter(Boolean);
+          .filter(isHotelImage);
         if (imgs.length) imageUrl = abs(imgs[0]);
       }
 
@@ -1163,6 +1612,13 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
           }
         }
       }
+      if (!stars) {
+        const textForStars = `${hotelName} ${pageTitle}`;
+        const direct = textForStars.match(/\b([1-5])\s*(?:\*|звезд(?:а|ы)?|stars?)\b/i);
+        if (direct) stars = direct[1];
+        const hotelTitle = textForStars.match(/(?:отель|hotel)\s+([1-5])\b/i);
+        if (!stars && hotelTitle) stars = hotelTitle[1];
+      }
 
       // Rating (e.g. 4.7) is typically shown as a green badge.
       let rating = '';
@@ -1175,7 +1631,7 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
         if (/^\d+(?:[.,]\d+)?$/.test(txt)) rating = txt.replace(',', '.');
       }
 
-      return { hotel_name: hotelName, main_image_url: imageUrl, hotel_rating: rating, hotel_stars: stars };
+      return { hotel_name: hotelName, page_title: pageTitle, main_image_url: imageUrl, hotel_rating: rating, hotel_stars: stars };
     }
     """
     try:
@@ -1238,14 +1694,20 @@ async def extract_base_hotel_details(page: Any) -> dict[str, str]:
         target_desc = normalize_space(combined)
 
         hotel_name = normalize_space(d.get("hotel_name", ""))
+        page_title = normalize_space(d.get("page_title", ""))
         target_desc = normalize_space(combined)
-        hotel_stars = normalize_space(d.get("hotel_stars", "")) or extract_hotel_stars_from_name(hotel_name)
+        hotel_stars = normalize_space(d.get("hotel_stars", "")) or extract_hotel_stars_from_name(
+            f"{hotel_name} {page_title}"
+        )
+        main_image_url = normalize_space(d.get("main_image_url", ""))
+        if is_placeholder_hotel_image_url(main_image_url):
+            main_image_url = ""
         return {
             "hotel_name": hotel_name,
             "hotel_rating": normalize_space(d.get("hotel_rating", "")),
             "hotel_stars": hotel_stars,
             "hotel_type": infer_hotel_type_from_target_description(target_desc),
-            "main_image_url": normalize_space(d.get("main_image_url", "")),
+            "main_image_url": main_image_url,
             "target_description": target_desc,
         }
     except Exception:
@@ -1371,9 +1833,10 @@ async def run(args: argparse.Namespace) -> None:
     db_emit = None
     db_finalize = None
     db_truncate = None
+    db_purge_stale = None
 
     if args.write_db:
-        db_emit, db_finalize, db_truncate = build_db_emitter(args.db_batch_size)
+        db_emit, db_finalize, db_truncate, db_purge_stale = build_db_emitter(args.db_batch_size)
 
     if args.reset_output and args.write_output:
         for p in (csv_out, json_out, jsonl_out):
@@ -1428,6 +1891,9 @@ async def run(args: argparse.Namespace) -> None:
     if db_finalize is not None:
         written_to_db = await db_finalize()
         print(f"[done] db_rows_flushed: {written_to_db}")
+    if db_purge_stale is not None:
+        deleted_stale = await db_purge_stale()
+        print(f"[db] stale_tours_deleted: {deleted_stale}", flush=True)
     if args.write_output:
         materialize_json_from_jsonl(jsonl_out, json_out)
 
@@ -1677,6 +2143,8 @@ async def process_country(
                                 )
 
                                 for offer in offers:
+                                    offer_checkin_beg = offer.get("checkin_beg") or first_beg
+                                    offer_checkin_end = offer.get("checkin_end") or end_date
                                     await emit_row(
                                         asdict(
                                             ParsedTour(
@@ -1688,8 +2156,8 @@ async def process_country(
                                                 child=child,
                                                 night_min=nmin,
                                                 night_max=nmax,
-                                                checkin_beg=first_beg,
-                                                checkin_end=end_date,
+                                                checkin_beg=offer_checkin_beg,
+                                                checkin_end=offer_checkin_end,
                                                 hotel_name=base_details.get("hotel_name", ""),
                                                 hotel_rating=base_details.get("hotel_rating", ""),
                                                 hotel_stars=base_details.get("hotel_stars", ""),
