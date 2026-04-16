@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlparse
@@ -228,7 +229,75 @@ MEAL_QUERY_ALIASES = {
 }
 
 
-def _detect_query_filters(query: str) -> dict[str, str]:
+CHILDREN_HOTEL_TYPE = "Для детей"
+ADULTS_HOTEL_TYPE = "Для взрослых"
+
+
+HOTEL_CATEGORY_WORDS = {
+    "одна": 1,
+    "один": 1,
+    "две": 2,
+    "два": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+}
+
+HOTEL_CATEGORY_PREFIXES = {
+    "одно": 1,
+    "двух": 2,
+    "трех": 3,
+    "четырех": 4,
+    "пяти": 5,
+}
+
+
+def _detect_hotel_category(normalized_query: str) -> int | None:
+    numeric_match = re.search(r"(?:^|\D)([1-5])\s*(?:\*|звезд\w*)(?:\D|$)", normalized_query)
+    if numeric_match:
+        return int(numeric_match.group(1))
+
+    for word, category in HOTEL_CATEGORY_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\s+звезд\w*\b", normalized_query):
+            return category
+
+    for prefix, category in HOTEL_CATEGORY_PREFIXES.items():
+        if re.search(rf"\b{re.escape(prefix)}звезд\w*\b", normalized_query):
+            return category
+
+    return None
+
+
+def _detect_audience_hotel_type(normalized_query: str) -> str | None:
+    adult_markers = (
+        "для взрослых",
+        "только для взрослых",
+        "без детей",
+        "18+",
+        "18 плюс",
+        "adults only",
+        "adult only",
+    )
+    child_markers = (
+        "для детей",
+        "с детьми",
+        "с ребенком",
+        "детский",
+        "детск",
+        "семей",
+        "kids",
+        "family",
+        "child friendly",
+    )
+
+    if any(marker in normalized_query for marker in adult_markers):
+        return ADULTS_HOTEL_TYPE
+    if any(marker in normalized_query for marker in child_markers):
+        return CHILDREN_HOTEL_TYPE
+    return None
+
+
+def _detect_query_filters(query: str) -> dict[str, str | int]:
     q = " ".join((query or "").lower().replace("ё", "е").split())
     detected: dict[str, str] = {}
     for token, slug in COUNTRY_QUERY_ALIASES.items():
@@ -245,8 +314,10 @@ def _detect_query_filters(query: str) -> dict[str, str]:
             break
     if any(token in q for token in ("пляж", "море", "берег")):
         detected["rest_type"] = "пляжный"
-    if any(token in q for token in ("ребен", "деть", "семей")):
-        detected["hotel_type"] = "для детей"
+    if hotel_type := _detect_audience_hotel_type(q):
+        detected["hotel_type"] = hotel_type
+    if hotel_category := _detect_hotel_category(q):
+        detected["hotel_category"] = hotel_category
     return detected
 
 
@@ -1400,6 +1471,12 @@ class AISearchAPI(APIView):
             qs = qs.filter(townfrom__iexact=townfrom)
         if meal := detected_filters.get("meal"):
             qs = qs.filter(meal__iexact=meal)
+        if rest_type := detected_filters.get("rest_type"):
+            qs = qs.filter(rest_type__iexact=rest_type)
+        if hotel_type := detected_filters.get("hotel_type"):
+            qs = qs.filter(hotel_type__iexact=hotel_type)
+        if hotel_category := detected_filters.get("hotel_category"):
+            qs = qs.filter(hotel_category=hotel_category)
 
         qs = qs.order_by("distance", "id")
 
